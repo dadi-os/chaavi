@@ -1,0 +1,25 @@
+{
+  "name": "chaavi",
+  "description": "Credential store adapter for Dadi",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "tsx --test --test-concurrency=1 test/**/*.test.ts"
+  },
+  "dependencies": {
+    "@bitwarden/cli": "^2026.8.0",
+    "fastify": "^5.12.3",
+    "smol-toml": "^1.8.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  }
+}
