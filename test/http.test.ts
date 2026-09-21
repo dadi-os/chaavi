@@ -7,6 +7,8 @@ import {
   LOGIN_ID,
   MISSING_ID,
   NOTE_ID,
+  PASSKEY_ID,
+  SAMPLE_PASSKEY,
   SSH_ID,
   makeConfig,
   sampleItems,
@@ -57,12 +59,15 @@ test("GET /v1/items returns metadata only", async () => {
   const res = await app.inject({ method: "GET", url: "/v1/items" });
   assert.equal(res.statusCode, 200);
   const body = res.json() as { items: Array<Record<string, unknown>> };
-  assert.equal(body.items.length, 3);
+  assert.equal(body.items.length, 4);
   for (const item of body.items) {
     assert.equal("password" in item, false);
     assert.equal("notes" in item, false);
     assert.equal("totp" in item, false);
     assert.equal("value" in item, false);
+    assert.equal("privateKey" in item, false);
+    assert.equal("credentialId" in item, false);
+    assert.equal(typeof item.hasPasskey, "boolean");
     assert.ok(typeof item.id === "string");
     assert.ok(typeof item.name === "string");
     assert.ok(item.kind === "login" || item.kind === "note" || item.kind === "secret");
@@ -74,7 +79,11 @@ test("GET /v1/items returns metadata only", async () => {
   assert.equal(github.name, "GitHub");
   assert.equal(github.kind, "login");
   assert.equal(github.username, "octocat");
+  assert.equal(github.hasPasskey, false);
   assert.deepEqual(github.uris, ["https://github.com"]);
+  const google = body.items.find((item) => item.id === PASSKEY_ID);
+  assert.ok(google);
+  assert.equal(google.hasPasskey, true);
 });
 
 test("GET /v1/items filters q/uri/kind", async () => {
@@ -137,6 +146,62 @@ test("POST /v1/items/:id/login returns username/password; not-a-login is invalid
   assert.equal(missing.json().error.type, "not_found");
 });
 
+test("POST /v1/logins creates a login without returning the password", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/v1/logins",
+    payload: {
+      name: "Greenhouse",
+      username: "ada@example.com",
+      uri: "https://job-boards.greenhouse.io",
+    },
+  });
+  assert.equal(res.statusCode, 200);
+  const item = res.json() as Record<string, unknown>;
+  assert.equal(typeof item.id, "string");
+  assert.equal(item.name, "Greenhouse");
+  assert.equal(item.kind, "login");
+  assert.equal(item.username, "ada@example.com");
+  assert.deepEqual(item.uris, ["https://job-boards.greenhouse.io"]);
+  assert.equal(item.hasPasskey, false);
+  assert.equal("password" in item, false);
+
+  const login = await app.inject({ method: "POST", url: `/v1/items/${item.id}/login` });
+  assert.equal(login.statusCode, 200);
+  assert.equal(login.json().username, "ada@example.com");
+  assert.equal(typeof login.json().password, "string");
+  assert.ok(String(login.json().password).length >= 12);
+});
+
+test("POST /v1/logins unknown field is 422", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/v1/logins",
+    payload: { name: "x", username: "ada", password: "nope" },
+  });
+  assert.equal(res.statusCode, 422);
+  assert.equal(res.json().error.type, "invalid_request");
+});
+
+test("POST /v1/items/:id/passkey returns CDP fields; missing passkey is invalid_request", async () => {
+  const passkey = await app.inject({ method: "POST", url: `/v1/items/${PASSKEY_ID}/passkey` });
+  assert.equal(passkey.statusCode, 200);
+  assert.deepEqual(passkey.json(), SAMPLE_PASSKEY);
+
+  const login = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/passkey` });
+  assert.equal(login.statusCode, 422);
+  assert.equal(login.json().error.type, "invalid_request");
+  assert.equal(login.json().error.message, "item has no passkey");
+
+  const note = await app.inject({ method: "POST", url: `/v1/items/${NOTE_ID}/passkey` });
+  assert.equal(note.statusCode, 422);
+  assert.equal(note.json().error.type, "invalid_request");
+
+  const missing = await app.inject({ method: "POST", url: `/v1/items/${MISSING_ID}/passkey` });
+  assert.equal(missing.statusCode, 404);
+  assert.equal(missing.json().error.type, "not_found");
+});
+
 test("POST /v1/items/:id/secret returns value", async () => {
   const login = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/secret` });
   assert.equal(login.statusCode, 200);
@@ -161,6 +226,7 @@ test("POST login with empty password is invalid_request", async () => {
         kind: "login",
         username: "x",
         uris: [],
+        hasPasskey: false,
       },
       password: "",
     },

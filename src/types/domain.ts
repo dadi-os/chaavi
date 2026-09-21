@@ -17,6 +17,8 @@ export type ItemRecord = {
   kind: ItemKind;
   username: string | null;
   uris: string[];
+  /** True when a login stores a FIDO2 passkey. Always false for notes/secrets. */
+  hasPasskey: boolean;
 };
 
 /** Username + password for a login item (`POST /v1/items/:id/login`). */
@@ -28,4 +30,26 @@ export type LoginCredential = {
 /** Opaque secret value (`POST /v1/items/:id/secret`). */
 export type SecretValue = {
   value: string;
+};
+
+/** Fields for `POST /v1/logins`. Password is generated in the vault, not supplied. */
+export type CreateLoginInput = {
+  name: string;
+  username: string;
+  uri?: string | undefined;
+  length?: number | undefined;
+  special?: boolean | undefined;
+};
+
+/**
+ * CDP-ready passkey for a Nas browser virtual authenticator
+ * (`POST /v1/items/:id/passkey`). Fields are standard base64, never logged.
+ */
+export type PasskeyCredential = {
+  credentialId: string;
+  rpId: string;
+  privateKey: string;
+  userHandle: string;
+  signCount: number;
+  resident: boolean;
 };

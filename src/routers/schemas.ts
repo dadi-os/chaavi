@@ -24,6 +24,16 @@ export function formatZod(error: ZodError): string {
 
 export const idParam = z.object({ id: z.string().uuid() }).strict();
 
+export const createLoginBody = z
+  .object({
+    name: z.string().min(1).max(200),
+    username: z.string().min(1).max(320),
+    uri: z.string().min(1).max(2000).optional(),
+    length: z.number().int().min(12).max(64).optional(),
+    special: z.boolean().optional(),
+  })
+  .strict();
+
 export const itemsQuery = z
   .object({
     q: z.string().min(1).optional(),

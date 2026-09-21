@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
 import { ChaaviError } from "../src/errors.js";
 import type { ItemRecord } from "../src/types/domain.js";
@@ -6,6 +7,7 @@ import {
   filterItems,
   itemRecordFromCipher,
   loginFromCipher,
+  passkeyFromCipher,
   secretFromCipher,
 } from "../src/vault/bw.js";
 
@@ -42,6 +44,7 @@ test("itemRecordFromCipher maps login metadata without secrets", () => {
     kind: "login",
     username: "octocat",
     uris: ["https://github.com"],
+    hasPasskey: false,
   });
 });
 
@@ -49,7 +52,9 @@ test("itemRecordFromCipher maps note and ssh kinds", () => {
   assert.equal(itemRecordFromCipher(noteCipher).kind, "note");
   assert.equal(itemRecordFromCipher(noteCipher).username, null);
   assert.deepEqual(itemRecordFromCipher(noteCipher).uris, []);
+  assert.equal(itemRecordFromCipher(noteCipher).hasPasskey, false);
   assert.equal(itemRecordFromCipher(sshCipher).kind, "secret");
+  assert.equal(itemRecordFromCipher(sshCipher).hasPasskey, false);
 });
 
 test("loginFromCipher requires a login with a password", () => {
@@ -60,6 +65,123 @@ test("loginFromCipher requires a login with a password", () => {
   assert.throws(
     () => loginFromCipher(noteCipher),
     (err: unknown) => err instanceof ChaaviError && err.type === "invalid_request",
+  );
+});
+
+test("passkeyFromCipher maps Bitwarden FIDO2 fields to CDP base64", () => {
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const der = privateKey.export({ type: "pkcs8", format: "der" }) as Buffer;
+  const credId = Buffer.from("cred-id-bytes");
+  const user = Buffer.from("ada@example.com");
+  const cipher = {
+    id: "pk-1",
+    name: "Google",
+    type: 1,
+    login: {
+      username: "ada",
+      fido2Credentials: [
+        {
+          credentialId: credId.toString("base64url"),
+          keyType: "public-key",
+          keyAlgorithm: "ECDSA",
+          keyCurve: "P-256",
+          keyValue: der.toString("base64url"),
+          rpId: "google.com",
+          userHandle: user.toString("base64url"),
+          counter: "3",
+          discoverable: "true",
+        },
+      ],
+    },
+  };
+  assert.equal(itemRecordFromCipher(cipher).hasPasskey, true);
+  assert.deepEqual(passkeyFromCipher(cipher), {
+    credentialId: credId.toString("base64"),
+    rpId: "google.com",
+    privateKey: der.toString("base64"),
+    userHandle: user.toString("base64"),
+    signCount: 3,
+    resident: true,
+  });
+});
+
+test("passkeyFromCipher decodes UUID credentialId as 16 bytes", () => {
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const der = privateKey.export({ type: "pkcs8", format: "der" }) as Buffer;
+  const guid = "550e8400-e29b-41d4-a716-446655440000";
+  const cipher = {
+    id: "pk-2",
+    name: "Google",
+    type: 1,
+    login: {
+      fido2Credentials: [
+        {
+          credentialId: guid,
+          keyAlgorithm: "ECDSA",
+          keyCurve: "P-256",
+          keyValue: der.toString("base64url"),
+          rpId: "google.com",
+          userHandle: Buffer.from("user").toString("base64url"),
+          counter: 0,
+          discoverable: true,
+        },
+      ],
+    },
+  };
+  const cred = passkeyFromCipher(cipher);
+  assert.equal(cred.credentialId, Buffer.from("550e8400e29b41d4a716446655440000", "hex").toString("base64"));
+});
+
+test("passkeyFromCipher requires a login with a passkey", () => {
+  assert.throws(
+    () => passkeyFromCipher(loginCipher),
+    (err: unknown) =>
+      err instanceof ChaaviError &&
+      err.type === "invalid_request" &&
+      err.message === "item has no passkey",
+  );
+  assert.throws(
+    () => passkeyFromCipher(noteCipher),
+    (err: unknown) => err instanceof ChaaviError && err.type === "invalid_request",
+  );
+});
+
+test("passkeyFromCipher rejects missing counter or discoverable", () => {
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const der = privateKey.export({ type: "pkcs8", format: "der" }) as Buffer;
+  const base = {
+    id: "pk-2",
+    name: "Site",
+    type: 1,
+    login: {
+      username: "ada",
+      fido2Credentials: [
+        {
+          credentialId: Buffer.from("id").toString("base64url"),
+          keyAlgorithm: "ECDSA",
+          keyCurve: "P-256",
+          keyValue: der.toString("base64url"),
+          rpId: "example.com",
+          userHandle: Buffer.from("u").toString("base64url"),
+          counter: 1,
+          discoverable: true,
+        },
+      ],
+    },
+  };
+  const noCounter = structuredClone(base);
+  delete (noCounter.login.fido2Credentials[0] as { counter?: number }).counter;
+  assert.throws(
+    () => passkeyFromCipher(noCounter),
+    (err: unknown) =>
+      err instanceof ChaaviError && err.message === "passkey is missing counter",
+  );
+  const noDiscoverable = structuredClone(base);
+  delete (noDiscoverable.login.fido2Credentials[0] as { discoverable?: boolean }).discoverable;
+  assert.throws(
+    () => passkeyFromCipher(noDiscoverable),
+    (err: unknown) =>
+      err instanceof ChaaviError && err.message === "passkey is missing discoverable",
   );
 });
 

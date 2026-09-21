@@ -4,8 +4,20 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { missingVaultCredential, type Config } from "../config.js";
 import { ChaaviError } from "../errors.js";
-import type { ItemFilter, ItemKind, ItemRecord, LoginCredential, SecretValue } from "../types/domain.js";
+import type {
+  CreateLoginInput,
+  ItemFilter,
+  ItemKind,
+  ItemRecord,
+  LoginCredential,
+  PasskeyCredential,
+  SecretValue,
+} from "../types/domain.js";
 import type { Vault } from "./index.js";
+import {
+  DEFAULT_PASSWORD_LENGTH,
+  generateLoginPassword,
+} from "./password.js";
 
 const CIPHER_LOGIN = 1;
 const CIPHER_SECURE_NOTE = 2;
@@ -45,6 +57,7 @@ type Cipher = {
     username?: unknown;
     password?: unknown;
     uris?: Array<{ uri?: unknown }>;
+    fido2Credentials?: unknown;
   };
   sshKey?: {
     privateKey?: unknown;
@@ -89,9 +102,34 @@ export class BwVault implements Vault {
     return itemRecordFromCipher(cipher);
   }
 
+  async createLogin(input: CreateLoginInput): Promise<ItemRecord> {
+    const length = input.length ?? DEFAULT_PASSWORD_LENGTH;
+    const special = input.special ?? true;
+    const password = generateLoginPassword({ length, special });
+    const payload = {
+      type: CIPHER_LOGIN,
+      name: input.name,
+      favorite: false,
+      reprompt: 0,
+      login: {
+        username: input.username,
+        password,
+        uris: input.uri !== undefined ? [{ uri: input.uri }] : [],
+      },
+    };
+    const encoded = Buffer.from(JSON.stringify(payload)).toString("base64");
+    const raw = await this.bw(["create", "item", encoded], { session: true });
+    return itemRecordFromCipher(asCipher(parseJson(raw)));
+  }
+
   async getLogin(id: string): Promise<LoginCredential> {
     const cipher = await this.getCipher(id);
     return loginFromCipher(cipher);
+  }
+
+  async getPasskey(id: string): Promise<PasskeyCredential> {
+    const cipher = await this.getCipher(id);
+    return passkeyFromCipher(cipher);
   }
 
   async getSecret(id: string): Promise<SecretValue> {
@@ -234,6 +272,42 @@ export function itemRecordFromCipher(cipher: Cipher): ItemRecord {
     kind,
     username,
     uris,
+    hasPasskey: kind === "login" && fido2List(cipher).length > 0,
+  };
+}
+
+/**
+ * First FIDO2 credential on a login cipher, encoded for Chrome
+ * `WebAuthn.addCredential` (standard base64 PKCS#8 / credential id / user handle).
+ */
+export function passkeyFromCipher(cipher: Cipher): PasskeyCredential {
+  if (numericType(cipher) !== CIPHER_LOGIN) {
+    throw new ChaaviError(422, "invalid_request", "item is not a login");
+  }
+  const raw = fido2List(cipher)[0];
+  if (raw === undefined) {
+    throw new ChaaviError(422, "invalid_request", "item has no passkey");
+  }
+  const rpId = requiredString(raw.rpId, "passkey is missing rpId");
+  const keyAlgorithm = typeof raw.keyAlgorithm === "string" ? raw.keyAlgorithm : "";
+  const keyCurve = typeof raw.keyCurve === "string" ? raw.keyCurve : "";
+  if (keyAlgorithm !== "ECDSA" || keyCurve !== "P-256") {
+    throw new ChaaviError(422, "invalid_request", "passkey is not ECDSA P-256");
+  }
+  const privateKey = stdB64(decodeBitwardenBytes(raw.keyValue, "passkey private key"));
+  const credentialId = stdB64(decodeCredentialId(raw.credentialId));
+  const resident = parseDiscoverable(raw.discoverable);
+  const userHandleRaw = decodeOptionalBytes(raw.userHandle);
+  if (resident && userHandleRaw.length === 0) {
+    throw new ChaaviError(422, "invalid_request", "passkey is missing userHandle");
+  }
+  return {
+    credentialId,
+    rpId,
+    privateKey,
+    userHandle: stdB64(userHandleRaw),
+    signCount: parseCounter(raw.counter),
+    resident,
   };
 }
 
@@ -310,6 +384,109 @@ function loginUris(cipher: Cipher): string[] {
     }
   }
   return out;
+}
+
+type Fido2Raw = {
+  credentialId?: unknown;
+  keyAlgorithm?: unknown;
+  keyCurve?: unknown;
+  keyValue?: unknown;
+  rpId?: unknown;
+  userHandle?: unknown;
+  counter?: unknown;
+  discoverable?: unknown;
+};
+
+/** Non-empty FIDO2 credential objects on a login cipher. */
+function fido2List(cipher: Cipher): Fido2Raw[] {
+  const raw = cipher.login?.fido2Credentials;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const out: Fido2Raw[] = [];
+  for (const entry of raw) {
+    if (typeof entry === "object" && entry !== null) {
+      out.push(entry as Fido2Raw);
+    }
+  }
+  return out;
+}
+
+/** Decode Bitwarden's credentialId: UUID hex bytes, or FIDO2 base64url. */
+function decodeCredentialId(value: unknown): Buffer {
+  const text = requiredString(value, "passkey is missing credentialId");
+  const guid = guidBytes(text);
+  if (guid !== undefined) {
+    return guid;
+  }
+  return decodeBitwardenBytes(text, "passkey credentialId");
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** 16-byte form of a hyphenated UUID, or undefined when `value` is not one. */
+function guidBytes(value: string): Buffer | undefined {
+  if (!UUID_RE.test(value)) {
+    return undefined;
+  }
+  return Buffer.from(value.replaceAll("-", ""), "hex");
+}
+
+/** Decode a Bitwarden FIDO2 string (URL-safe base64, optional padding). */
+function decodeBitwardenBytes(value: unknown, label: string): Buffer {
+  const text = requiredString(value, `${label} is missing`);
+  const buf = Buffer.from(text, "base64url");
+  if (buf.length === 0) {
+    throw new ChaaviError(422, "invalid_request", `${label} is not valid base64`);
+  }
+  return buf;
+}
+
+/** Decode an optional Bitwarden FIDO2 string; empty when absent. */
+function decodeOptionalBytes(value: unknown): Buffer {
+  if (typeof value !== "string" || value.length === 0) {
+    return Buffer.alloc(0);
+  }
+  const buf = Buffer.from(value, "base64url");
+  if (buf.length === 0) {
+    throw new ChaaviError(422, "invalid_request", "passkey userHandle is not valid base64");
+  }
+  return buf;
+}
+
+function requiredString(value: unknown, message: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ChaaviError(422, "invalid_request", message);
+  }
+  return value;
+}
+
+function stdB64(buf: Buffer): string {
+  return buf.toString("base64");
+}
+
+function parseCounter(value: unknown): number {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+  if (typeof value === "string" && value.length > 0) {
+    const n = Number(value);
+    if (Number.isInteger(n) && n >= 0) {
+      return n;
+    }
+  }
+  throw new ChaaviError(422, "invalid_request", "passkey is missing counter");
+}
+
+function parseDiscoverable(value: unknown): boolean {
+  if (value === true || value === "true") {
+    return true;
+  }
+  if (value === false || value === "false") {
+    return false;
+  }
+  throw new ChaaviError(422, "invalid_request", "passkey is missing discoverable");
 }
 
 /** Narrow CLI JSON to a cipher object. */

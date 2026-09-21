@@ -62,13 +62,13 @@ Concurrency cancels superseded runs on the same ref.
 
 ## Logging / error codes
 
-Logs follow the nas JSON contract (`service=chaavi`, request summary with `request_id` / `duration_ms`, errors with `code`). Default Fastify access logging is off. Process-level boot/shutdown lines use the same JSON shape via `createLogger()`. Request lines include method and path (item id on reveal routes) — never password, totp, notes body, or secret values.
+Logs follow the nas JSON contract (`service=chaavi`, request summary with `request_id` / `duration_ms`, errors with `code`). Default Fastify access logging is off. Process-level boot/shutdown lines use the same JSON shape via `createLogger()`. Request lines include method and path (item id on reveal routes) — never password, totp, notes body, passkey keys, or secret values.
 
 HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`. Shared codes include `invalid_request`, `not_found`, `internal_error`. Domain codes include `vault_unconfigured`, `vault_unreachable`. See nas README for the shared catalog.
 
 | Code | Status | When |
 | --- | --- | --- |
-| `invalid_request` | 422 | Validation / item is not a login / no secret to reveal |
+| `invalid_request` | 422 | Validation / item is not a login / no secret or passkey to reveal / create body invalid |
 | `not_found` | 404 | Unknown item id |
 | `vault_unconfigured` | 503 | A vault env var is empty; `message` names it |
 | `vault_unreachable` | 502 | `bw` / Vaultwarden failure |
@@ -88,9 +88,11 @@ Human fill uses `https://chaavi.dadi`. Hath/Dimaag catalog and inject stay on cl
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/health` | `{ "status": "ok", "vault": "ready" \| "unconfigured" }`. Does not ping Vaultwarden. |
-| `GET` | `/v1/items` | Catalog metadata. Query: `q`, `uri`, `kind` (`login` \| `note` \| `secret`). |
+| `GET` | `/v1/items` | Catalog metadata (`hasPasskey` on logins). Query: `q`, `uri`, `kind` (`login` \| `note` \| `secret`). |
 | `GET` | `/v1/items/:id` | One item's metadata. |
+| `POST` | `/v1/logins` | Create a login; password is generated in the vault. Body: `name`, `username`, optional `uri` / `length` (12–64, default 20) / `special` (default true). Returns catalog metadata, never the password. |
 | `POST` | `/v1/items/:id/login` | `{ "username", "password" }` for a login item. |
+| `POST` | `/v1/items/:id/passkey` | CDP-ready passkey (`credentialId`, `rpId`, `privateKey`, `userHandle`, `signCount`, `resident`). |
 | `POST` | `/v1/items/:id/secret` | `{ "value" }` — login password, note body, or a single secret field. |
 
-Unknown query fields are a 422. List/detail never include password, totp, notes body, keys, or attachments.
+Unknown query fields are a 422. List/detail never include password, totp, notes body, keys, passkey material, or attachments.
