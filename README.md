@@ -31,15 +31,15 @@ chaavi/
 
 Default bind is `0.0.0.0:8080` in `src/constants.ts`. Prod may set `HOST` and `PORT` (validated; empty falls back to the constants).
 
-| Variable | Required | Notes |
+| Variable | Required at boot | Notes |
 | --- | --- | --- |
-| `VAULT_URL` | yes | Internal Vaultwarden URL. Fail at startup if missing/empty. |
-| `BW_CLIENTID` | all-or-none | Personal API key client id |
-| `BW_CLIENTSECRET` | all-or-none | Personal API key client secret |
-| `BW_PASSWORD` | all-or-none | Master password for `bw unlock` |
-| `BITWARDENCLI_APPDATA_DIR` | when configured | CLI state dir. Set in the image/compose. Fail at startup if `BW_*` are set and this is empty. |
+| `VAULT_URL` | no | Internal Vaultwarden URL. Nas injects it. Empty fails on first `/v1` use. |
+| `BW_CLIENTID` | no | Personal API key client id. Set in Preferences → Chaavi. |
+| `BW_CLIENTSECRET` | no | Personal API key client secret. |
+| `BW_PASSWORD` | no | Master password for `bw unlock`. |
+| `BITWARDENCLI_APPDATA_DIR` | no | CLI state dir. Set in the image/compose. |
 
-All three `BW_*` empty (or unset) = vault unconfigured: the process boots, `/health` reports `vault: "unconfigured"`, `/v1/*` returns `503 vault_unconfigured`. Partial `BW_*` (some set, some empty) fails at startup. Empty string counts as unset.
+The process always boots. Empty or partial vault env is reported by `/health` as `vault: "unconfigured"`. The first `/v1` call returns `503 vault_unconfigured` and names the first empty variable. Empty string counts as unset.
 
 ## Local run
 
@@ -70,7 +70,7 @@ HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`. Shared codes
 | --- | --- | --- |
 | `invalid_request` | 422 | Validation / item is not a login / no secret to reveal |
 | `not_found` | 404 | Unknown item id |
-| `vault_unconfigured` | 503 | `BW_*` unset |
+| `vault_unconfigured` | 503 | A vault env var is empty; `message` names it |
 | `vault_unreachable` | 502 | `bw` / Vaultwarden failure |
 | `internal_error` | 500 | Unexpected failure |
 
@@ -78,7 +78,7 @@ HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`. Shared codes
 
 1. Sign up the first user at `https://chaavi.dadi` (Bitwarden web vault or extension). Hath trusts the mesh CA on join. `SIGNUPS_ALLOWED` is on the Vaultwarden container, not this process.
 2. Create a personal API key in the Bitwarden account.
-3. Put `BW_CLIENTID`, `BW_CLIENTSECRET`, and `BW_PASSWORD` in `modules/chaavi/.env` (and compose env). Restart chaavi.
+3. Put `BW_CLIENTID`, `BW_CLIENTSECRET`, and `BW_PASSWORD` in Preferences → Chaavi on the box (writes `modules/chaavi/.env` and restarts chaavi). In compose, the same keys live in `chaavi/.env`.
 4. `/health` should report `"vault": "ready"`. Hath and Dimaag can call `/v1/*`.
 
 Human fill uses `https://chaavi.dadi`. Hath/Dimaag catalog and inject stay on cleartext `http://chaavi.dadi/v1*` (mesh proxy).

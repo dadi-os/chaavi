@@ -1,5 +1,5 @@
 import Fastify, { LogController, type FastifyInstance } from "fastify";
-import type { Config } from "./config.js";
+import { missingVaultCredential, type Config } from "./config.js";
 import { ChaaviError } from "./errors.js";
 import { registerRequestLogging } from "./logging.js";
 import { registerRoutes } from "./routers/index.js";
@@ -72,7 +72,7 @@ export async function buildApp(
 
   app.get("/health", async () => ({
     status: "ok",
-    vault: config.env.bw !== undefined ? "ready" : "unconfigured",
+    vault: missingVaultCredential(config) === undefined ? "ready" : "unconfigured",
   }));
   await app.register(registerRoutes);
   return app;

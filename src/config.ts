@@ -19,7 +19,10 @@ const fileSchema = z.object({
 /** Parsed `config.toml` (vault timeout). */
 export type FileConfig = z.infer<typeof fileSchema>;
 
-/** Personal API key + master password used by the Bitwarden CLI. */
+/**
+ * Personal API key + master password used by the Bitwarden CLI.
+ * Fields may be empty; {@link missingVaultCredential} is checked on first vault use.
+ */
 export type BwCredentials = {
   clientId: string;
   clientSecret: string;
@@ -28,16 +31,16 @@ export type BwCredentials = {
   appDataDir: string;
 };
 
-/** Runtime config: toml + required env (memoized by `loadConfig`). */
+/** Runtime config: toml + env (memoized by `loadConfig`). Empty secrets are allowed. */
 export type Config = {
   serviceRoot: string;
   env: {
+    /** `VAULT_URL`. Empty until the process environment sets it. */
     vaultUrl: string;
     host: string;
     port: number;
     logLevel: typeof LOG_LEVEL;
-    /** Present only when BW_CLIENTID, BW_CLIENTSECRET, and BW_PASSWORD are all set. */
-    bw: BwCredentials | undefined;
+    bw: BwCredentials;
   };
   vault: FileConfig["vault"];
 };
@@ -65,75 +68,62 @@ export function resetConfigCache(): void {
 }
 
 /**
- * Load process config from config.toml and required env.
- * @throws When config.toml is invalid, VAULT_URL is missing, BW_* is partial, or
- *   BITWARDENCLI_APPDATA_DIR is missing while the vault is configured.
+ * Load process config from config.toml and the environment.
+ * Vault secrets may be empty; the process still boots. {@link missingVaultCredential}
+ * names the first empty value when a route actually unlocks the vault.
+ * @throws When config.toml is invalid or PORT is not a valid port.
  */
 export function loadConfig(): Config {
   if (cached) {
     return cached;
   }
   const file = loadFileConfig();
-  const vaultUrl = requiredEnv("VAULT_URL");
   cached = {
     serviceRoot,
     env: {
-      vaultUrl,
+      vaultUrl: envString("VAULT_URL"),
       host: listenHost(),
       port: listenPort(),
       logLevel: LOG_LEVEL,
-      bw: loadBwCredentials(),
+      bw: {
+        clientId: envString("BW_CLIENTID"),
+        clientSecret: envString("BW_CLIENTSECRET"),
+        password: envString("BW_PASSWORD"),
+        appDataDir: envString("BITWARDENCLI_APPDATA_DIR"),
+      },
     },
     vault: file.vault,
   };
   return cached;
 }
 
-/** Read a required env var; empty string is missing. */
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (value === undefined || value.length === 0) {
-    throw new Error(`${name} is required`);
-  }
-  return value;
-}
-
-/** Read an optional env var; empty string is unset. */
-function optionalEnv(name: string): string | undefined {
-  const value = process.env[name];
-  if (value === undefined || value.length === 0) {
-    return undefined;
-  }
-  return value;
-}
-
 /**
- * BW_* are all empty (unconfigured) or all set. Partial credentials fail startup.
- * When configured, BITWARDENCLI_APPDATA_DIR is required.
+ * First empty vault env var, in unlock order.
+ * Undefined when every vault value is set.
  */
-function loadBwCredentials(): BwCredentials | undefined {
-  const names = ["BW_CLIENTID", "BW_CLIENTSECRET", "BW_PASSWORD"] as const;
-  const present = names.filter((name) => optionalEnv(name) !== undefined);
-  const missing = names.filter((name) => optionalEnv(name) === undefined);
-  if (present.length === 0) {
-    return undefined;
+export function missingVaultCredential(config: Config): string | undefined {
+  const pairs: Array<[string, string]> = [
+    ["VAULT_URL", config.env.vaultUrl],
+    ["BW_CLIENTID", config.env.bw.clientId],
+    ["BW_CLIENTSECRET", config.env.bw.clientSecret],
+    ["BW_PASSWORD", config.env.bw.password],
+    ["BITWARDENCLI_APPDATA_DIR", config.env.bw.appDataDir],
+  ];
+  for (const [name, value] of pairs) {
+    if (value.length === 0) {
+      return name;
+    }
   }
-  if (missing.length > 0) {
-    throw new Error(
-      `partial Bitwarden credentials: set ${missing.join(", ")} or clear ${present.join(", ")}`,
-    );
+  return undefined;
+}
+
+/** Read an env var. Unset and empty are both `""`. */
+function envString(name: string): string {
+  const value = process.env[name];
+  if (value === undefined) {
+    return "";
   }
-  const clientId = optionalEnv("BW_CLIENTID");
-  const clientSecret = optionalEnv("BW_CLIENTSECRET");
-  const password = optionalEnv("BW_PASSWORD");
-  if (clientId === undefined || clientSecret === undefined || password === undefined) {
-    throw new Error("partial Bitwarden credentials");
-  }
-  const appDataDir = optionalEnv("BITWARDENCLI_APPDATA_DIR");
-  if (appDataDir === undefined) {
-    throw new Error("BITWARDENCLI_APPDATA_DIR is required when the vault is configured");
-  }
-  return { clientId, clientSecret, password, appDataDir };
+  return value;
 }
 
 /**

@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import type { Config } from "../config.js";
+import { missingVaultCredential, type Config } from "../config.js";
 import { ChaaviError } from "../errors.js";
 import type { ItemFilter, ItemKind, ItemRecord, LoginCredential, SecretValue } from "../types/domain.js";
 import type { Vault } from "./index.js";
@@ -121,11 +121,12 @@ export class BwVault implements Vault {
 
   /** `bw config server`, `login --apikey`, `unlock --passwordenv BW_PASSWORD --raw`. */
   async unlockOnce(): Promise<string> {
-    const creds = this.#config.env.bw;
-    if (creds === undefined) {
-      throw new ChaaviError(503, "vault_unconfigured", "vault is not configured");
+    const missing = missingVaultCredential(this.#config);
+    if (missing !== undefined) {
+      throw new ChaaviError(503, "vault_unconfigured", `${missing} is not set`);
     }
-    await this.bw(["config", "server", this.#config.env.vaultUrl], { session: false });
+    const creds = this.#config.env.bw;
+    await this.ensureServer(this.#config.env.vaultUrl);
     await this.bw(["login", "--apikey"], {
       session: false,
       extraEnv: {
@@ -146,6 +147,20 @@ export class BwVault implements Vault {
   }
 
   /**
+   * Point `bw` at `url`. A second start is already logged in, and `bw config server`
+   * then exits with "Logout required" even when the saved URL matches.
+   */
+  async ensureServer(url: string): Promise<void> {
+    await this.bw(["config", "server", url], { session: false, serverUnchangedOk: true });
+    const current = (await this.bw(["config", "server"], { session: false })).trim();
+    if (current === url) {
+      return;
+    }
+    await this.bw(["logout"], { session: false, logoutOk: true });
+    await this.bw(["config", "server", url], { session: false });
+  }
+
+  /**
    * Run `bw --nointeraction …`. Never logs stdout. Error messages omit
    * session, password, and CLI stdout.
    */
@@ -156,16 +171,17 @@ export class BwVault implements Vault {
       extraEnv?: NodeJS.ProcessEnv;
       notFound?: boolean;
       alreadyLoggedInOk?: boolean;
+      /** `bw config server` refused because a session already exists. */
+      serverUnchangedOk?: boolean;
+      /** `bw logout` when no session is stored. */
+      logoutOk?: boolean;
     },
   ): Promise<string> {
-    const creds = this.#config.env.bw;
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       ...(opts.extraEnv ?? {}),
+      BITWARDENCLI_APPDATA_DIR: this.#config.env.bw.appDataDir,
     };
-    if (creds !== undefined) {
-      env.BITWARDENCLI_APPDATA_DIR = creds.appDataDir;
-    }
     const argv = ["--nointeraction", ...args];
     if (opts.session) {
       argv.push("--session", await this.session());
@@ -184,6 +200,15 @@ export class BwVault implements Vault {
       throw new ChaaviError(404, "not_found", "item not found");
     }
     if (opts.alreadyLoggedInOk && /already logged in/i.test(result.stderr)) {
+      return "";
+    }
+    if (
+      opts.serverUnchangedOk &&
+      /logout required before server config update/i.test(result.stderr)
+    ) {
+      return "";
+    }
+    if (opts.logoutOk && /not logged in/i.test(result.stderr)) {
       return "";
     }
     if (result.code === null) {

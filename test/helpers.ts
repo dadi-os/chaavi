@@ -9,7 +9,7 @@ import { filterItems, type Vault } from "../src/vault/index.js";
 const serviceRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Config for Fastify inject tests. Does not read process.env. */
-export function makeConfig(args: { configured: boolean }): Config {
+export function makeConfig(): Config {
   return {
     serviceRoot,
     env: {
@@ -17,14 +17,12 @@ export function makeConfig(args: { configured: boolean }): Config {
       host: HOST,
       port: PORT,
       logLevel: LOG_LEVEL,
-      bw: args.configured
-        ? {
-            clientId: "test-client",
-            clientSecret: "test-secret",
-            password: "test-password",
-            appDataDir: "/tmp/chaavi-test-bw",
-          }
-        : undefined,
+      bw: {
+        clientId: "test-client",
+        clientSecret: "test-secret",
+        password: "test-password",
+        appDataDir: "/tmp/chaavi-test-bw",
+      },
     },
     vault: { timeout_ms: 30_000 },
   };

@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadConfig, resetConfigCache } from "../src/config.js";
+import { loadConfig, missingVaultCredential, resetConfigCache } from "../src/config.js";
 
 const BW_KEYS = [
   "VAULT_URL",
@@ -42,7 +42,7 @@ function withEnv(vars: Record<string, string | undefined>, fn: () => void): void
   }
 }
 
-test("loadConfig requires VAULT_URL", () => {
+test("loadConfig boots with empty vault env", () => {
   withEnv(
     {
       VAULT_URL: undefined,
@@ -52,71 +52,31 @@ test("loadConfig requires VAULT_URL", () => {
       BITWARDENCLI_APPDATA_DIR: undefined,
     },
     () => {
-      assert.throws(() => loadConfig(), /VAULT_URL is required/);
-    },
-  );
-});
-
-test("loadConfig treats empty VAULT_URL as missing", () => {
-  withEnv(
-    {
-      VAULT_URL: "",
-      BW_CLIENTID: undefined,
-      BW_CLIENTSECRET: undefined,
-      BW_PASSWORD: undefined,
-    },
-    () => {
-      assert.throws(() => loadConfig(), /VAULT_URL is required/);
-    },
-  );
-});
-
-test("loadConfig accepts all-empty BW_* as unconfigured", () => {
-  withEnv(
-    {
-      VAULT_URL: "http://127.0.0.1:80",
-      BW_CLIENTID: "",
-      BW_CLIENTSECRET: undefined,
-      BW_PASSWORD: "",
-      BITWARDENCLI_APPDATA_DIR: undefined,
-    },
-    () => {
       const config = loadConfig();
-      assert.equal(config.env.vaultUrl, "http://127.0.0.1:80");
-      assert.equal(config.env.bw, undefined);
+      assert.equal(config.env.vaultUrl, "");
+      assert.equal(config.env.bw.clientId, "");
+      assert.equal(config.env.bw.clientSecret, "");
+      assert.equal(config.env.bw.password, "");
+      assert.equal(config.env.bw.appDataDir, "");
+      assert.equal(missingVaultCredential(config), "VAULT_URL");
       assert.equal(config.vault.timeout_ms, 30_000);
     },
   );
 });
 
-test("loadConfig throws on partial BW_*", () => {
+test("loadConfig treats empty strings as unset and reports the first gap", () => {
   withEnv(
     {
       VAULT_URL: "http://127.0.0.1:80",
       BW_CLIENTID: "user.abc",
-      BW_CLIENTSECRET: undefined,
+      BW_CLIENTSECRET: "",
       BW_PASSWORD: undefined,
-    },
-    () => {
-      assert.throws(() => loadConfig(), /partial Bitwarden credentials/);
-    },
-  );
-});
-
-test("loadConfig requires BITWARDENCLI_APPDATA_DIR when BW_* are set", () => {
-  withEnv(
-    {
-      VAULT_URL: "http://127.0.0.1:80",
-      BW_CLIENTID: "user.abc",
-      BW_CLIENTSECRET: "secret",
-      BW_PASSWORD: "pass",
       BITWARDENCLI_APPDATA_DIR: undefined,
     },
     () => {
-      assert.throws(
-        () => loadConfig(),
-        /BITWARDENCLI_APPDATA_DIR is required when the vault is configured/,
-      );
+      const config = loadConfig();
+      assert.equal(config.env.bw.clientId, "user.abc");
+      assert.equal(missingVaultCredential(config), "BW_CLIENTSECRET");
     },
   );
 });
@@ -134,11 +94,11 @@ test("loadConfig returns bw credentials when all set", () => {
     () => {
       const config = loadConfig();
       assert.equal(config.env.vaultUrl, "http://chaavi-vault:80");
-      assert.ok(config.env.bw);
       assert.equal(config.env.bw.clientId, "user.abc");
       assert.equal(config.env.bw.clientSecret, "secret");
       assert.equal(config.env.bw.password, "pass");
       assert.equal(config.env.bw.appDataDir, appDataDir);
+      assert.equal(missingVaultCredential(config), undefined);
     },
   );
 });

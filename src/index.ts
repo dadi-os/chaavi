@@ -6,11 +6,11 @@
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logging.js";
-import { BwVault, UnconfiguredVault } from "./vault/index.js";
+import { BwVault } from "./vault/index.js";
 
 const log = createLogger();
 const config = loadConfig();
-const vault = config.env.bw !== undefined ? new BwVault(config) : new UnconfiguredVault();
+const vault = new BwVault(config);
 const app = await buildApp(config, { vault });
 
 const shutdown = async (signal: string) => {
