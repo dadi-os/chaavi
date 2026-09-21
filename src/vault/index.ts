@@ -18,14 +18,19 @@ export type {
   PasskeyCredential,
   SecretValue,
 } from "../types/domain.js";
-export { BwVault, filterItems } from "./bw.js";
+export { BwVault, filterItems, upsertItem } from "./bw.js";
 export { generateLoginPassword } from "./password.js";
 
 /**
  * Credential store used by HTTP routes. Implementations must not log
  * passwords, notes bodies, passkey keys, or other secret values.
+ *
+ * `start` / `stop` own lifecycle (unlock, catalog load, background sync).
+ * Catalog reads are in-process; Vaultwarden is durability only.
  */
 export type Vault = {
+  start(): Promise<void>;
+  stop(): Promise<void>;
   listItems(filter: ItemFilter): Promise<ItemRecord[]>;
   getItem(id: string): Promise<ItemRecord>;
   createLogin(input: CreateLoginInput): Promise<ItemRecord>;

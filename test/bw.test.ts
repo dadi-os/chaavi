@@ -5,6 +5,7 @@ import { ChaaviError } from "../src/errors.js";
 import type { ItemRecord } from "../src/types/domain.js";
 import {
   filterItems,
+  upsertItem,
   itemRecordFromCipher,
   loginFromCipher,
   passkeyFromCipher,
@@ -209,4 +210,18 @@ test("filterItems matches q, uri, and kind", () => {
   assert.equal(filterItems(items, { kind: "note" })[0]?.id, "note-1");
   assert.equal(filterItems(items, { kind: "secret" })[0]?.id, "ssh-1");
   assert.equal(filterItems(items, { q: "nope" }).length, 0);
+});
+
+test("upsertItem appends or replaces by id", () => {
+  const login = itemRecordFromCipher(loginCipher);
+  const note = itemRecordFromCipher(noteCipher);
+  const once = upsertItem([], login);
+  assert.deepEqual(once, [login]);
+  const two = upsertItem(once, note);
+  assert.deepEqual(two, [login, note]);
+  const renamed = { ...login, name: "GitHub renamed" };
+  const updated = upsertItem(two, renamed);
+  assert.equal(updated.length, 2);
+  assert.equal(updated[0]?.name, "GitHub renamed");
+  assert.equal(updated[1]?.id, "note-1");
 });

@@ -13,10 +13,11 @@ const tomlPath = join(serviceRoot, "config.toml");
 const fileSchema = z.object({
   vault: z.object({
     timeout_ms: z.number().int().positive(),
+    sync_interval_ms: z.number().int().positive(),
   }),
 });
 
-/** Parsed `config.toml` (vault timeout). */
+/** Parsed `config.toml` (vault CLI timeout and background sync interval). */
 export type FileConfig = z.infer<typeof fileSchema>;
 
 /**

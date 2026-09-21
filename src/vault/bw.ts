@@ -1,9 +1,13 @@
-/** Bitwarden CLI vault: lazy unlock, then list/get over `--session`. */
+/**
+ * Bitwarden CLI vault: Chaavi owns an in-memory catalog; Vaultwarden is
+ * durability. `bw` is the crypto/transport driver (unlock, sync, create, get).
+ */
 
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { missingVaultCredential, type Config } from "../config.js";
 import { ChaaviError } from "../errors.js";
+import type { Logger } from "../logging.js";
 import type {
   CreateLoginInput,
   ItemFilter,
@@ -48,6 +52,17 @@ export function filterItems(items: ItemRecord[], filter: ItemFilter): ItemRecord
   });
 }
 
+/** Replace or append an item in the catalog by id. */
+export function upsertItem(items: ItemRecord[], item: ItemRecord): ItemRecord[] {
+  const index = items.findIndex((entry) => entry.id === item.id);
+  if (index === -1) {
+    return [...items, item];
+  }
+  const next = items.slice();
+  next[index] = item;
+  return next;
+}
+
 type Cipher = {
   id?: unknown;
   name?: unknown;
@@ -71,55 +86,98 @@ type BwExec = {
 };
 
 /**
- * Vault backed by `@bitwarden/cli` (`bw`). Session is established once, on
- * first use, under a mutex. Stdout of `get item` is parsed in memory and never logged.
+ * Vault backed by `@bitwarden/cli` (`bw`). Catalog metadata lives in process
+ * memory and refreshes on a background sync loop. Reveal paths decrypt on
+ * demand from the CLI cache; secrets are never stored in the catalog.
  */
 export class BwVault implements Vault {
   readonly #config: Config;
   readonly #bin: string;
+  readonly #log: Logger;
   #session: Promise<string> | undefined;
+  #items: ItemRecord[] = [];
+  #refresh: Promise<void> | undefined;
+  #timer: ReturnType<typeof setInterval> | undefined;
+  /** Serializes catalog writes so a stale sync cannot overwrite a create. */
+  #catalogOp: Promise<unknown> = Promise.resolve();
 
-  constructor(config: Config) {
+  constructor(config: Config, log: Logger) {
     this.#config = config;
     this.#bin = join(config.serviceRoot, "node_modules", ".bin", "bw");
+    this.#log = log;
+  }
+
+  /**
+   * Unlock, pull the first catalog, and start the background sync loop when
+   * vault env is complete. No-op when unconfigured (health stays unconfigured).
+   * @throws When vault env is set but the first sync fails.
+   */
+  async start(): Promise<void> {
+    if (missingVaultCredential(this.#config) !== undefined) {
+      return;
+    }
+    await this.refreshCatalog();
+    this.#timer = setInterval(() => {
+      void this.tick();
+    }, this.#config.vault.sync_interval_ms);
+  }
+
+  /** Stop the background sync loop and wait for an in-flight refresh. */
+  async stop(): Promise<void> {
+    if (this.#timer !== undefined) {
+      clearInterval(this.#timer);
+      this.#timer = undefined;
+    }
+    if (this.#refresh !== undefined) {
+      try {
+        await this.#refresh;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "vault sync failed";
+        this.#log.warn("vault sync aborted on shutdown", {
+          code: "vault_unreachable",
+          err: message,
+        });
+      }
+    }
   }
 
   async listItems(filter: ItemFilter): Promise<ItemRecord[]> {
-    const raw = await this.bw(["list", "items"], { session: true });
-    const parsed: unknown = parseJson(raw);
-    if (!Array.isArray(parsed)) {
-      throw unreachable("vault returned invalid json");
-    }
-    const items: ItemRecord[] = [];
-    for (const entry of parsed) {
-      items.push(itemRecordFromCipher(asCipher(entry)));
-    }
-    return filterItems(items, filter);
+    this.requireConfigured();
+    return filterItems(this.#items, filter);
   }
 
   async getItem(id: string): Promise<ItemRecord> {
-    const cipher = await this.getCipher(id);
-    return itemRecordFromCipher(cipher);
+    this.requireConfigured();
+    const item = this.#items.find((entry) => entry.id === id);
+    if (item === undefined) {
+      throw new ChaaviError(404, "not_found", "item not found");
+    }
+    return item;
   }
 
   async createLogin(input: CreateLoginInput): Promise<ItemRecord> {
-    const length = input.length ?? DEFAULT_PASSWORD_LENGTH;
-    const special = input.special ?? true;
-    const password = generateLoginPassword({ length, special });
-    const payload = {
-      type: CIPHER_LOGIN,
-      name: input.name,
-      favorite: false,
-      reprompt: 0,
-      login: {
-        username: input.username,
-        password,
-        uris: input.uri !== undefined ? [{ uri: input.uri }] : [],
-      },
-    };
-    const encoded = Buffer.from(JSON.stringify(payload)).toString("base64");
-    const raw = await this.bw(["create", "item", encoded], { session: true });
-    return itemRecordFromCipher(asCipher(parseJson(raw)));
+    this.requireConfigured();
+    return this.#withCatalog(async () => {
+      const length = input.length ?? DEFAULT_PASSWORD_LENGTH;
+      const special = input.special ?? true;
+      const password = generateLoginPassword({ length, special });
+      const payload = {
+        type: CIPHER_LOGIN,
+        name: input.name,
+        favorite: false,
+        reprompt: 0,
+        login: {
+          username: input.username,
+          password,
+          uris: input.uri !== undefined ? [{ uri: input.uri }] : [],
+        },
+      };
+      const encoded = Buffer.from(JSON.stringify(payload)).toString("base64");
+      const raw = await this.bw(["create", "item", encoded], { session: true });
+      const record = itemRecordFromCipher(asCipher(parseJson(raw)));
+      this.#items = upsertItem(this.#items, record);
+      return record;
+    });
   }
 
   async getLogin(id: string): Promise<LoginCredential> {
@@ -137,10 +195,73 @@ export class BwVault implements Vault {
     return secretFromCipher(cipher);
   }
 
-  /** Fetch one cipher by id; map CLI "Not found." to 404. */
+  /** Fetch one cipher by id from the CLI cache; map CLI "Not found." to 404. */
   async getCipher(id: string): Promise<Cipher> {
+    this.requireConfigured();
     const raw = await this.bw(["get", "item", id], { session: true, notFound: true });
     return asCipher(parseJson(raw));
+  }
+
+  /**
+   * Background tick: pull Vaultwarden into the CLI cache and replace the
+   * catalog. Failures are logged; the next tick retries.
+   */
+  async tick(): Promise<void> {
+    try {
+      await this.refreshCatalog();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "vault sync failed";
+      this.#log.warn("vault sync failed", { code: "vault_unreachable", err: message });
+    }
+  }
+
+  /**
+   * Coalesced `bw sync` + `bw list items` into `#items`. Concurrent callers
+   * share one in-flight refresh; create/login waits on the same queue.
+   */
+  refreshCatalog(): Promise<void> {
+    if (this.#refresh === undefined) {
+      this.#refresh = this.#withCatalog(() => this.pullCatalog()).finally(() => {
+        this.#refresh = undefined;
+      });
+    }
+    return this.#refresh;
+  }
+
+  /** Sync from Vaultwarden and replace the in-memory catalog. */
+  async pullCatalog(): Promise<void> {
+    await this.bw(["sync"], { session: true });
+    const raw = await this.bw(["list", "items"], { session: true });
+    const parsed: unknown = parseJson(raw);
+    if (!Array.isArray(parsed)) {
+      throw unreachable("vault returned invalid json");
+    }
+    const items: ItemRecord[] = [];
+    for (const entry of parsed) {
+      items.push(itemRecordFromCipher(asCipher(entry)));
+    }
+    this.#items = items;
+  }
+
+  /**
+   * Run `fn` alone against `#items` so a sync cannot finish between a create
+   * and its local upsert (or wipe a just-created row).
+   */
+  #withCatalog<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.#catalogOp.then(fn, fn);
+    this.#catalogOp = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** Throw 503 when vault env is incomplete. */
+  requireConfigured(): void {
+    const missing = missingVaultCredential(this.#config);
+    if (missing !== undefined) {
+      throw new ChaaviError(503, "vault_unconfigured", `${missing} is not set`);
+    }
   }
 
   /**

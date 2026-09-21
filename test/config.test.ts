@@ -60,6 +60,7 @@ test("loadConfig boots with empty vault env", () => {
       assert.equal(config.env.bw.appDataDir, "");
       assert.equal(missingVaultCredential(config), "VAULT_URL");
       assert.equal(config.vault.timeout_ms, 30_000);
+      assert.equal(config.vault.sync_interval_ms, 2_000);
     },
   );
 });

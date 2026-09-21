@@ -1,6 +1,8 @@
 # Chaavi
 
-Credential store adapter for dadi. Vaultwarden holds passwords and passkeys; this process is the HTTP adapter in front of it (`GET /health` plus `/v1/*` for Hath catalog and Dimaag inject). Human fill in Arc uses the official Bitwarden extension pointed at `https://chaavi.dadi` — Caddy terminates TLS with a mesh-local CA (Hath installs it on join) and sends non-`/v1` traffic to Vaultwarden. This repo does not fork Vaultwarden; Nas runs unmodified upstream `vaultwarden/server:1.37.2-alpine`.
+Credential data API for dadi. Chaavi owns the catalog and `/v1` semantics for Hath and Dimaag. Vaultwarden is the encrypted store (zero-knowledge durability for the Bitwarden extension). `@bitwarden/cli` is the crypto/transport driver only — unlock, background sync, create, and decrypt-on-reveal.
+
+Human fill in Arc uses the official Bitwarden extension at `https://chaavi.dadi`. Caddy terminates TLS with a mesh-local CA (Hath installs it on join): `/v1*` and `/health` go to Chaavi; everything else goes to Vaultwarden. This repo does not fork Vaultwarden; Nas runs unmodified upstream `vaultwarden/server:1.37.2-alpine`.
 
 Unauthenticated; private mesh only.
 
@@ -8,7 +10,7 @@ Unauthenticated; private mesh only.
 
 - Vaultwarden at `VAULT_URL` (Nas sidecar `chaavi-vault`, image `vaultwarden/server:1.37.2-alpine`)
 - Nas for mesh DNS (`chaavi.dadi`), compose/prod networking, and the shared logging contract
-- Bitwarden CLI (`@bitwarden/cli`) in-process — decrypts for `/v1` when `BW_*` are set
+- Bitwarden CLI (`@bitwarden/cli`) in-process — driver for sync/create/reveal when `BW_*` are set
 
 Dwar operational keys stay in Nas `modules/dwar`. Agent unlock keys are Chaavi module env, not Dwar/Nas operational secrets.
 
@@ -18,7 +20,7 @@ Dwar operational keys stay in Nas `modules/dwar`. Agent unlock keys are Chaavi m
 chaavi/
   src/
     app.ts, config.ts, logging.ts, errors.ts, constants.ts
-    vault/        Vault interface + bw CLI implementation
+    vault/        Vault interface + bw CLI implementation + in-memory catalog
     routers/      HTTP routes + schemas
     types/        domain types
   test/
@@ -27,19 +29,19 @@ chaavi/
 
 ## Config vs env
 
-`config.toml` (checked in): vault `timeout_ms`.
+`config.toml` (checked in): vault `timeout_ms`, `sync_interval_ms` (background Vaultwarden pull; default 2000 to match Hath's house poll).
 
 Default bind is `0.0.0.0:8080` in `src/constants.ts`. Prod may set `HOST` and `PORT` (validated; empty falls back to the constants).
 
 | Variable | Required at boot | Notes |
 | --- | --- | --- |
-| `VAULT_URL` | no | Internal Vaultwarden URL. Nas injects it. Empty fails on first `/v1` use. |
+| `VAULT_URL` | no | Internal Vaultwarden URL. Nas injects it. Empty → `vault: "unconfigured"`. |
 | `BW_CLIENTID` | no | Personal API key client id. Set in Preferences → Chaavi. |
 | `BW_CLIENTSECRET` | no | Personal API key client secret. |
 | `BW_PASSWORD` | no | Master password for `bw unlock`. |
 | `BITWARDENCLI_APPDATA_DIR` | no | CLI state dir. Set in the image/compose. |
 
-The process always boots. Empty or partial vault env is reported by `/health` as `vault: "unconfigured"`. The first `/v1` call returns `503 vault_unconfigured` and names the first empty variable. Empty string counts as unset.
+The process always boots. Empty or partial vault env is reported by `/health` as `vault: "unconfigured"`; `Vault.start` is a no-op and `/v1` returns `503 vault_unconfigured` naming the first empty variable. When vault env is complete, boot unlocks, runs a first sync into the in-memory catalog (fails closed if that sync fails), then refreshes on `sync_interval_ms`. Empty string counts as unset.
 
 ## Local run
 
@@ -62,7 +64,7 @@ Concurrency cancels superseded runs on the same ref.
 
 ## Logging / error codes
 
-Logs follow the nas JSON contract (`service=chaavi`, request summary with `request_id` / `duration_ms`, errors with `code`). Default Fastify access logging is off. Process-level boot/shutdown lines use the same JSON shape via `createLogger()`. Request lines include method and path (item id on reveal routes) — never password, totp, notes body, passkey keys, or secret values.
+Logs follow the nas JSON contract (`service=chaavi`, request summary with `request_id` / `duration_ms`, errors with `code`). Default Fastify access logging is off. Process-level boot/shutdown lines use the same JSON shape via `createLogger()`. Request lines include method and path (item id on reveal routes) — never password, totp, notes body, passkey keys, or secret values. Background sync failures log `vault_unreachable` and retry on the next tick.
 
 HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`. Shared codes include `invalid_request`, `not_found`, `internal_error`. Domain codes include `vault_unconfigured`, `vault_unreachable`. See nas README for the shared catalog.
 
@@ -88,10 +90,10 @@ Human fill uses `https://chaavi.dadi`. Hath/Dimaag catalog and inject stay on cl
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/health` | `{ "status": "ok", "vault": "ready" \| "unconfigured" }`. Does not ping Vaultwarden. |
-| `GET` | `/v1/items` | Catalog metadata (`hasPasskey` on logins). Query: `q`, `uri`, `kind` (`login` \| `note` \| `secret`). |
-| `GET` | `/v1/items/:id` | One item's metadata. |
-| `POST` | `/v1/logins` | Create a login; password is generated in the vault. Body: `name`, `username`, optional `uri` / `length` (12–64, default 20) / `special` (default true). Returns catalog metadata, never the password. |
-| `POST` | `/v1/items/:id/login` | `{ "username", "password" }` for a login item. |
+| `GET` | `/v1/items` | Catalog metadata from Chaavi's in-memory catalog (`hasPasskey` on logins). Query: `q`, `uri`, `kind` (`login` \| `note` \| `secret`). |
+| `GET` | `/v1/items/:id` | One item's metadata from the catalog. |
+| `POST` | `/v1/logins` | Create a login; password is generated in the vault. Body: `name`, `username`, optional `uri` / `length` (12–64, default 20) / `special` (default true). Returns catalog metadata, never the password. Upserts the catalog immediately. |
+| `POST` | `/v1/items/:id/login` | `{ "username", "password" }` for a login item (decrypt on demand). |
 | `POST` | `/v1/items/:id/passkey` | CDP-ready passkey (`credentialId`, `rpId`, `privateKey`, `userHandle`, `signCount`, `resident`). |
 | `POST` | `/v1/items/:id/secret` | `{ "value" }` — login password, note body, or a single secret field. |
 

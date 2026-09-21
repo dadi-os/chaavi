@@ -1,6 +1,7 @@
 /**
- * Process entry: listen, then shut down on SIGINT/SIGTERM.
- * Vault unlock is lazy on first `/v1` use; health never talks to Vaultwarden.
+ * Process entry: start vault (catalog + sync loop), listen, shut down cleanly.
+ * Vault unlock and first sync run before listen when BW_* are set; health never
+ * talks to Vaultwarden.
  */
 
 import { buildApp } from "./app.js";
@@ -10,11 +11,13 @@ import { BwVault } from "./vault/index.js";
 
 const log = createLogger();
 const config = loadConfig();
-const vault = new BwVault(config);
+const vault = new BwVault(config, log);
+await vault.start();
 const app = await buildApp(config, { vault });
 
 const shutdown = async (signal: string) => {
   log.info("shutting down", { signal });
+  await vault.stop();
   await app.close();
 };
 

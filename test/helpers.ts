@@ -33,7 +33,7 @@ export function makeConfig(): Config {
         appDataDir: "/tmp/chaavi-test-bw",
       },
     },
-    vault: { timeout_ms: 30_000 },
+    vault: { timeout_ms: 30_000, sync_interval_ms: 2_000 },
   };
 }
 
@@ -53,6 +53,10 @@ export class FakeVault implements Vault {
   seed(items: FakeItem[]): void {
     this.items = items;
   }
+
+  async start(): Promise<void> {}
+
+  async stop(): Promise<void> {}
 
   async listItems(filter: ItemFilter): Promise<ItemRecord[]> {
     return filterItems(

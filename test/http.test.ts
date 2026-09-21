@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { buildApp } from "../src/app.js";
+import { createLogger } from "../src/logging.js";
 import { BwVault } from "../src/vault/bw.js";
 import {
   FakeVault,
@@ -44,7 +45,7 @@ test("GET /v1/items is 503 and names the first empty vault variable", async () =
   const config = makeConfig();
   config.env.vaultUrl = "https://chaavi.dadi";
   config.env.bw = { ...config.env.bw, clientSecret: "" };
-  const bare = await buildApp(config, { vault: new BwVault(config) });
+  const bare = await buildApp(config, { vault: new BwVault(config, createLogger()) });
   try {
     const res = await bare.inject({ method: "GET", url: "/v1/items" });
     assert.equal(res.statusCode, 503);
