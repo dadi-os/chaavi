@@ -1,6 +1,6 @@
 # Chaavi
 
-Credential store adapter for dadi. Vaultwarden holds passwords and passkeys; this process is the HTTP adapter in front of it (`GET /health` plus `/v1/*` for Hath catalog and Dimaag inject). Human fill in Arc uses the official Bitwarden extension pointed at `http://chaavi.dadi` — Caddy sends non-`/v1` traffic to Vaultwarden. This repo does not fork Vaultwarden; Nas runs unmodified upstream `vaultwarden/server:1.37.2-alpine`.
+Credential store adapter for dadi. Vaultwarden holds passwords and passkeys; this process is the HTTP adapter in front of it (`GET /health` plus `/v1/*` for Hath catalog and Dimaag inject). Human fill in Arc uses the official Bitwarden extension pointed at `https://chaavi.dadi` — Caddy terminates TLS with a mesh-local CA (Hath installs it on join) and sends non-`/v1` traffic to Vaultwarden. This repo does not fork Vaultwarden; Nas runs unmodified upstream `vaultwarden/server:1.37.2-alpine`.
 
 Unauthenticated; private mesh only.
 
@@ -76,10 +76,12 @@ HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`. Shared codes
 
 ## Vault setup
 
-1. Sign up the first user through the Bitwarden extension pointed at `http://chaavi.dadi`. `SIGNUPS_ALLOWED` is on the Vaultwarden container, not this process.
+1. Sign up the first user at `https://chaavi.dadi` (Bitwarden web vault or extension). Hath trusts the mesh CA on join. `SIGNUPS_ALLOWED` is on the Vaultwarden container, not this process.
 2. Create a personal API key in the Bitwarden account.
 3. Put `BW_CLIENTID`, `BW_CLIENTSECRET`, and `BW_PASSWORD` in `modules/chaavi/.env` (and compose env). Restart chaavi.
 4. `/health` should report `"vault": "ready"`. Hath and Dimaag can call `/v1/*`.
+
+Human fill uses `https://chaavi.dadi`. Hath/Dimaag catalog and inject stay on cleartext `http://chaavi.dadi/v1*` (mesh proxy).
 
 ## Routes
 
