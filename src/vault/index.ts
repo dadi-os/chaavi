@@ -7,6 +7,7 @@ import type {
   LoginCredential,
   PasskeyCredential,
   SecretValue,
+  UpdateLoginInput,
 } from "../types/domain.js";
 
 export type {
@@ -17,6 +18,7 @@ export type {
   LoginCredential,
   PasskeyCredential,
   SecretValue,
+  UpdateLoginInput,
 } from "../types/domain.js";
 export { BwVault, filterItems, upsertItem } from "./bw.js";
 export { generateLoginPassword } from "./password.js";
@@ -34,6 +36,8 @@ export type Vault = {
   listItems(filter: ItemFilter): Promise<ItemRecord[]>;
   getItem(id: string): Promise<ItemRecord>;
   createLogin(input: CreateLoginInput): Promise<ItemRecord>;
+  updateLogin(id: string, input: UpdateLoginInput): Promise<ItemRecord>;
+  deleteItem(id: string): Promise<void>;
   getLogin(id: string): Promise<LoginCredential>;
   getPasskey(id: string): Promise<PasskeyCredential>;
   getSecret(id: string): Promise<SecretValue>;

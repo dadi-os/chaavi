@@ -32,13 +32,28 @@ export type SecretValue = {
   value: string;
 };
 
-/** Fields for `POST /v1/logins`. Password is generated in the vault, not supplied. */
+/**
+ * Fields for `POST /v1/logins`.
+ * When `password` is omitted the vault generates one (`length` / `special`).
+ */
 export type CreateLoginInput = {
   name: string;
   username: string;
   uri?: string | undefined;
+  password?: string | undefined;
   length?: number | undefined;
   special?: boolean | undefined;
+};
+
+/**
+ * Fields for `PATCH /v1/items/:id` on a login.
+ * At least one field is required; omitted password leaves the stored one unchanged.
+ */
+export type UpdateLoginInput = {
+  name?: string | undefined;
+  username?: string | undefined;
+  uri?: string | undefined;
+  password?: string | undefined;
 };
 
 /**

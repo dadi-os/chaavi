@@ -29,10 +29,41 @@ export const createLoginBody = z
     name: z.string().min(1).max(200),
     username: z.string().min(1).max(320),
     uri: z.string().min(1).max(2000).optional(),
+    password: z.string().min(1).max(500).optional(),
     length: z.number().int().min(12).max(64).optional(),
     special: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((body, ctx) => {
+    if (body.password !== undefined && (body.length !== undefined || body.special !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "length and special apply only when password is omitted",
+      });
+    }
+  });
+
+export const updateLoginBody = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    username: z.string().min(1).max(320).optional(),
+    uri: z.string().max(2000).optional(),
+    password: z.string().min(1).max(500).optional(),
+  })
+  .strict()
+  .superRefine((body, ctx) => {
+    if (
+      body.name === undefined &&
+      body.username === undefined &&
+      body.uri === undefined &&
+      body.password === undefined
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "at least one of name, username, uri, password is required",
+      });
+    }
+  });
 
 export const itemsQuery = z
   .object({

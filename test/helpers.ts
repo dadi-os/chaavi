@@ -11,6 +11,7 @@ import type {
   LoginCredential,
   PasskeyCredential,
   SecretValue,
+  UpdateLoginInput,
 } from "../src/types/domain.js";
 import { filterItems, type Vault } from "../src/vault/index.js";
 import { DEFAULT_PASSWORD_LENGTH, generateLoginPassword } from "../src/vault/password.js";
@@ -70,10 +71,13 @@ export class FakeVault implements Vault {
   }
 
   async createLogin(input: CreateLoginInput): Promise<ItemRecord> {
-    const password = generateLoginPassword({
-      length: input.length ?? DEFAULT_PASSWORD_LENGTH,
-      special: input.special ?? true,
-    });
+    const password =
+      input.password !== undefined
+        ? input.password
+        : generateLoginPassword({
+            length: input.length ?? DEFAULT_PASSWORD_LENGTH,
+            special: input.special ?? true,
+          });
     const record: ItemRecord = {
       id: randomUUID(),
       name: input.name,
@@ -84,6 +88,37 @@ export class FakeVault implements Vault {
     };
     this.items.push({ record, password });
     return record;
+  }
+
+  async updateLogin(id: string, input: UpdateLoginInput): Promise<ItemRecord> {
+    const item = this.find(id);
+    if (item.record.kind !== "login") {
+      throw new ChaaviError(422, "invalid_request", "item is not a login");
+    }
+    if (input.name !== undefined) {
+      item.record = { ...item.record, name: input.name };
+    }
+    if (input.username !== undefined) {
+      item.record = { ...item.record, username: input.username };
+    }
+    if (input.uri !== undefined) {
+      item.record = {
+        ...item.record,
+        uris: input.uri.length > 0 ? [input.uri] : [],
+      };
+    }
+    if (input.password !== undefined) {
+      item.password = input.password;
+    }
+    return item.record;
+  }
+
+  async deleteItem(id: string): Promise<void> {
+    const item = this.find(id);
+    if (item.record.kind !== "login") {
+      throw new ChaaviError(422, "invalid_request", "item is not a login");
+    }
+    this.items = this.items.filter((entry) => entry.record.id !== id);
   }
 
   async getLogin(id: string): Promise<LoginCredential> {

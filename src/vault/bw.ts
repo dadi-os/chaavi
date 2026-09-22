@@ -1,6 +1,7 @@
 /**
  * Bitwarden CLI vault: Chaavi owns an in-memory catalog; Vaultwarden is
- * durability. `bw` is the crypto/transport driver (unlock, sync, create, get).
+ * durability. `bw` is the crypto/transport driver (unlock, sync, create, edit,
+ * delete, get).
  */
 
 import { spawn } from "node:child_process";
@@ -16,6 +17,7 @@ import type {
   LoginCredential,
   PasskeyCredential,
   SecretValue,
+  UpdateLoginInput,
 } from "../types/domain.js";
 import type { Vault } from "./index.js";
 import {
@@ -158,9 +160,13 @@ export class BwVault implements Vault {
   async createLogin(input: CreateLoginInput): Promise<ItemRecord> {
     this.requireConfigured();
     return this.#withCatalog(async () => {
-      const length = input.length ?? DEFAULT_PASSWORD_LENGTH;
-      const special = input.special ?? true;
-      const password = generateLoginPassword({ length, special });
+      const password =
+        input.password !== undefined
+          ? input.password
+          : generateLoginPassword({
+              length: input.length ?? DEFAULT_PASSWORD_LENGTH,
+              special: input.special ?? true,
+            });
       const payload = {
         type: CIPHER_LOGIN,
         name: input.name,
@@ -177,6 +183,50 @@ export class BwVault implements Vault {
       const record = itemRecordFromCipher(asCipher(parseJson(raw)));
       this.#items = upsertItem(this.#items, record);
       return record;
+    });
+  }
+
+  async updateLogin(id: string, input: UpdateLoginInput): Promise<ItemRecord> {
+    this.requireConfigured();
+    return this.#withCatalog(async () => {
+      const cipher = await this.getCipher(id);
+      if (numericType(cipher) !== CIPHER_LOGIN) {
+        throw new ChaaviError(422, "invalid_request", "item is not a login");
+      }
+      if (input.name !== undefined) {
+        cipher.name = input.name;
+      }
+      const login = cipher.login ?? {};
+      cipher.login = login;
+      if (input.username !== undefined) {
+        login.username = input.username;
+      }
+      if (input.password !== undefined) {
+        login.password = input.password;
+      }
+      if (input.uri !== undefined) {
+        login.uris = input.uri.length > 0 ? [{ uri: input.uri }] : [];
+      }
+      const encoded = Buffer.from(JSON.stringify(cipher)).toString("base64");
+      const raw = await this.bw(["edit", "item", id, encoded], { session: true });
+      const record = itemRecordFromCipher(asCipher(parseJson(raw)));
+      this.#items = upsertItem(this.#items, record);
+      return record;
+    });
+  }
+
+  async deleteItem(id: string): Promise<void> {
+    this.requireConfigured();
+    return this.#withCatalog(async () => {
+      const existing = this.#items.find((entry) => entry.id === id);
+      if (existing === undefined) {
+        throw new ChaaviError(404, "not_found", "item not found");
+      }
+      if (existing.kind !== "login") {
+        throw new ChaaviError(422, "invalid_request", "item is not a login");
+      }
+      await this.bw(["delete", "item", id], { session: true, notFound: true });
+      this.#items = this.#items.filter((entry) => entry.id !== id);
     });
   }
 
@@ -241,6 +291,7 @@ export class BwVault implements Vault {
       items.push(itemRecordFromCipher(asCipher(entry)));
     }
     this.#items = items;
+    this.#log.debug("vault catalog refreshed", { items: items.length });
   }
 
   /**

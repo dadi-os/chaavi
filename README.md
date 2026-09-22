@@ -1,8 +1,8 @@
 # Chaavi
 
-Credential data API for dadi. Chaavi owns the catalog and `/v1` semantics for Hath and Dimaag. Vaultwarden is the encrypted store (zero-knowledge durability for the Bitwarden extension). `@bitwarden/cli` is the crypto/transport driver only — unlock, background sync, create, and decrypt-on-reveal.
+Credential data API for dadi. Chaavi owns the catalog and `/v1` semantics for Hath and Dimaag. Vaultwarden is the encrypted store (zero-knowledge durability for the Bitwarden extension). `@bitwarden/cli` is the crypto/transport driver only — unlock, background sync, create/edit/delete, and decrypt-on-reveal.
 
-Human fill in Arc uses the official Bitwarden extension at `https://chaavi.dadi`. Caddy terminates TLS with a mesh-local CA (Hath installs it on join): `/v1*` and `/health` go to Chaavi; everything else goes to Vaultwarden. This repo does not fork Vaultwarden; Nas runs unmodified upstream `vaultwarden/server:1.37.2-alpine`.
+Human fill in Arc uses the official Bitwarden extension at `https://chaavi.dadi`. Hath's Chaavi page is the login password manager over this adapter. Caddy terminates TLS with a mesh-local CA (Hath installs it on join): `/v1*` and `/health` go to Chaavi; everything else goes to Vaultwarden. This repo does not fork Vaultwarden; Nas runs unmodified upstream `vaultwarden/server:1.37.2-alpine`.
 
 Unauthenticated; private mesh only.
 
@@ -10,7 +10,7 @@ Unauthenticated; private mesh only.
 
 - Vaultwarden at `VAULT_URL` (Nas sidecar `chaavi-vault`, image `vaultwarden/server:1.37.2-alpine`)
 - Nas for mesh DNS (`chaavi.dadi`), compose/prod networking, and the shared logging contract
-- Bitwarden CLI (`@bitwarden/cli`) in-process — driver for sync/create/reveal when `BW_*` are set
+- Bitwarden CLI (`@bitwarden/cli`) in-process — driver for sync/create/edit/delete/reveal when `BW_*` are set
 
 Dwar operational keys stay in Nas `modules/dwar`. Agent unlock keys are Chaavi module env, not Dwar/Nas operational secrets.
 
@@ -83,7 +83,7 @@ HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`. Shared codes
 3. Put `BW_CLIENTID`, `BW_CLIENTSECRET`, and `BW_PASSWORD` in Preferences → Chaavi on the box (writes `modules/chaavi/.env` and restarts chaavi). In compose, the same keys live in `chaavi/.env`.
 4. `/health` should report `"vault": "ready"`. Hath and Dimaag can call `/v1/*`.
 
-Human fill uses `https://chaavi.dadi`. Hath/Dimaag catalog and inject stay on cleartext `http://chaavi.dadi/v1*` (mesh proxy).
+Human fill uses `https://chaavi.dadi` (Bitwarden extension / web vault). Hath's password manager and Dimaag inject use cleartext `http://chaavi.dadi/v1*` (mesh proxy).
 
 ## Routes
 
@@ -92,7 +92,9 @@ Human fill uses `https://chaavi.dadi`. Hath/Dimaag catalog and inject stay on cl
 | `GET` | `/health` | `{ "status": "ok", "vault": "ready" \| "unconfigured" }`. Does not ping Vaultwarden. |
 | `GET` | `/v1/items` | Catalog metadata from Chaavi's in-memory catalog (`hasPasskey` on logins). Query: `q`, `uri`, `kind` (`login` \| `note` \| `secret`). |
 | `GET` | `/v1/items/:id` | One item's metadata from the catalog. |
-| `POST` | `/v1/logins` | Create a login; password is generated in the vault. Body: `name`, `username`, optional `uri` / `length` (12–64, default 20) / `special` (default true). Returns catalog metadata, never the password. Upserts the catalog immediately. |
+| `POST` | `/v1/logins` | Create a login. Body: `name`, `username`, optional `uri` / `password` / `length` (12–64, default 20) / `special` (default true). When `password` is omitted the vault generates one (`length`/`special`); when supplied, `length`/`special` are rejected. Returns catalog metadata, never the password. Upserts the catalog immediately. |
+| `PATCH` | `/v1/items/:id` | Update a login. Body: at least one of `name`, `username`, `uri`, `password`. Empty `uri` clears websites. Non-login → `422`. Returns catalog metadata. |
+| `DELETE` | `/v1/items/:id` | Delete a login (`204`). Non-login → `422`. |
 | `POST` | `/v1/items/:id/login` | `{ "username", "password" }` for a login item (decrypt on demand). |
 | `POST` | `/v1/items/:id/passkey` | CDP-ready passkey (`credentialId`, `rpId`, `privateKey`, `userHandle`, `signCount`, `resident`). |
 | `POST` | `/v1/items/:id/secret` | `{ "value" }` — login password, note body, or a single secret field. |
