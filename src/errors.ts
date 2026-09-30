@@ -1,5 +1,6 @@
 /** HTTP errors in the contract shape `{error: {type, message}}`. */
 
+/** A failure with an HTTP status and a stable error `type`, rendered as `{ error: { type, message } }`. */
 export class ChaaviError extends Error {
   readonly statusCode: number;
   readonly type: string;

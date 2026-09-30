@@ -1,8 +1,8 @@
 # Chaavi
 
-Credential data API for dadi. Chaavi owns the catalog and `/v1` semantics for Hath and Dimaag. Vaultwarden is the encrypted store (zero-knowledge durability for the Bitwarden extension). `@bitwarden/cli` is the crypto/transport driver only — unlock, background sync, create/edit/delete, and decrypt-on-reveal.
+Credential data API for dadi. Chaavi owns the catalog and `/v1` semantics for Thaali and Hath. Vaultwarden is the encrypted store (zero-knowledge durability for the Bitwarden extension). `@bitwarden/cli` is the crypto/transport driver only — unlock, background sync, create/edit/delete, and decrypt-on-reveal.
 
-Human fill in Arc uses the official Bitwarden extension at `https://chaavi.dadi`. Hath's Chaavi page is the login password manager over this adapter. Caddy terminates TLS with a mesh-local CA (Hath installs it on join): `/v1*` and `/health` go to Chaavi; everything else goes to Vaultwarden. This repo does not fork Vaultwarden; Nas runs unmodified upstream `vaultwarden/server:1.37.2-alpine`.
+Human fill in Arc uses the official Bitwarden extension at `https://chaavi.dadi`. Thaali's Chaavi page is the login password manager over this adapter. Caddy terminates TLS with a mesh-local CA (Thaali installs it on join): `/v1*` and `/health` go to Chaavi; everything else goes to Vaultwarden. This repo does not fork Vaultwarden; Nas runs unmodified upstream `vaultwarden/server:1.37.2-alpine`.
 
 Unauthenticated; private mesh only.
 
@@ -29,7 +29,7 @@ chaavi/
 
 ## Config vs env
 
-`config.toml` (checked in): vault `timeout_ms`, `sync_interval_ms` (background Vaultwarden pull; default 2000 to match Hath's house poll).
+`config.toml` (checked in): vault `timeout_ms`, `sync_interval_ms` (background Vaultwarden pull; default 2000 to match Thaali's house poll).
 
 Default bind is `0.0.0.0:8080` in `src/constants.ts`. Prod may set `HOST` and `PORT` (validated; empty falls back to the constants).
 
@@ -78,12 +78,12 @@ HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`. Shared codes
 
 ## Vault setup
 
-1. Sign up the first user at `https://chaavi.dadi` (Bitwarden web vault or extension). Hath trusts the mesh CA on join. `SIGNUPS_ALLOWED` is on the Vaultwarden container, not this process.
+1. Sign up the first user at `https://chaavi.dadi` (Bitwarden web vault or extension). Thaali trusts the mesh CA on join. `SIGNUPS_ALLOWED` is on the Vaultwarden container, not this process.
 2. Create a personal API key in the Bitwarden account.
 3. Put `BW_CLIENTID`, `BW_CLIENTSECRET`, and `BW_PASSWORD` in Preferences → Chaavi on the box (writes `modules/chaavi/.env` and restarts chaavi). In compose, the same keys live in `chaavi/.env`.
-4. `/health` should report `"vault": "ready"`. Hath and Dimaag can call `/v1/*`.
+4. `/health` should report `"vault": "ready"`. Thaali and Hath can call `/v1/*`.
 
-Human fill uses `https://chaavi.dadi` (Bitwarden extension / web vault). Hath's password manager and Dimaag inject use cleartext `http://chaavi.dadi/v1*` (mesh proxy).
+Human fill uses `https://chaavi.dadi` (Bitwarden extension / web vault). Thaali's password manager and Hath inject use cleartext `http://chaavi.dadi/v1*` (mesh proxy).
 
 ## Routes
 
