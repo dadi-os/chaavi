@@ -84,7 +84,7 @@ export async function registerRequestLogging(app: FastifyInstance): Promise<void
     const payload = {
       request_id: request.requestId,
       method: request.method,
-      path: request.url.split("?")[0] ?? request.url,
+      path: request.url.replace(/\?.*$/, ""),
       status,
       duration_ms: Math.round(durationMs),
     };
