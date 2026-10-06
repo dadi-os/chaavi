@@ -134,7 +134,7 @@ export class BwVault implements Vault {
       try {
         await this.#refresh;
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : "vault sync failed";
+        const message = err instanceof Error ? err.message : String(err);
         this.#log.warn("vault sync aborted on shutdown", {
           code: "vault_unreachable",
           err: message,
@@ -260,7 +260,7 @@ export class BwVault implements Vault {
     try {
       await this.refreshCatalog();
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "vault sync failed";
+      const message = err instanceof Error ? err.message : String(err);
       this.#log.warn("vault sync failed", { code: "vault_unreachable", err: message });
     }
   }
@@ -400,7 +400,7 @@ export class BwVault implements Vault {
     try {
       result = await runBw(this.#bin, argv, env, this.#config.vault.timeout_ms);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "vault command failed";
+      const message = err instanceof Error ? err.message : String(err);
       throw unreachable(sanitize(message));
     }
     if (result.code === 0) {

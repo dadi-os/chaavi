@@ -12,6 +12,7 @@ concurrency:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v6
@@ -33,6 +34,7 @@ jobs:
     needs: ci
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write

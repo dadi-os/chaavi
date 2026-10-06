@@ -51,8 +51,9 @@ export function loadFileConfig(): FileConfig {
   let raw: string;
   try {
     raw = readFileSync(tomlPath, "utf8");
-  } catch {
-    throw new Error(`missing config file: ${tomlPath}`);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`cannot read config file ${tomlPath}: ${reason}`, { cause: err });
   }
   const parsed = fileSchema.safeParse(parseToml(raw));
   if (!parsed.success) {
