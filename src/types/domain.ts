@@ -1,24 +1,268 @@
-/** Agent-facing vault record shapes. Secrets never appear on list/detail. */
+/**
+ * Vault record shapes for Thaali and Hath. Secret values never appear on an {@link Item};
+ * they come back one at a time from the reveal routes.
+ */
 
-/** Catalog kind for a vault item. */
-export type ItemKind = "login" | "note" | "secret";
+/** Bitwarden item types Chaavi serves. */
+export type ItemType = "login" | "note" | "card" | "identity" | "sshKey";
 
-/** Optional list filters applied in-process after `bw list items`. */
+/** How the Bitwarden extension matches a login URI; `default` follows the account setting. */
+export type UriMatch = "default" | "domain" | "host" | "startsWith" | "exact" | "regex" | "never";
+
+/** A login website. */
+export type LoginUri = {
+  uri: string;
+  match: UriMatch;
+};
+
+/** Item property a linked custom field points at, by item type. */
+export type LinkedTarget =
+  | "username"
+  | "password"
+  | "cardholderName"
+  | "expMonth"
+  | "expYear"
+  | "code"
+  | "brand"
+  | "number"
+  | "title"
+  | "firstName"
+  | "middleName"
+  | "lastName"
+  | "fullName"
+  | "address1"
+  | "address2"
+  | "address3"
+  | "city"
+  | "state"
+  | "postalCode"
+  | "country"
+  | "company"
+  | "email"
+  | "phone"
+  | "ssn"
+  | "passportNumber"
+  | "licenseNumber";
+
+/** A custom field as listed: a hidden field says only whether it holds a value. */
+export type CustomField =
+  | { name: string; type: "text"; value: string }
+  | { name: string; type: "hidden"; hasValue: boolean }
+  | { name: string; type: "boolean"; value: boolean }
+  | { name: string; type: "linked"; linkedTo: LinkedTarget };
+
+/**
+ * A custom field to write. A hidden field without `value` on update keeps the stored value
+ * of the hidden field with the same name.
+ */
+export type CustomFieldInput =
+  | { name: string; type: "text"; value: string }
+  | { name: string; type: "hidden"; value?: string | undefined }
+  | { name: string; type: "boolean"; value: boolean }
+  | { name: string; type: "linked"; linkedTo: LinkedTarget };
+
+/** A FIDO2 passkey on a login, without its key material. */
+export type PasskeyInfo = {
+  rpId: string;
+  userName: string | null;
+  creationDate: string | null;
+};
+
+/** Login fields that are not secret, plus which secrets it holds. */
+export type LoginDetail = {
+  username: string | null;
+  uris: LoginUri[];
+  hasPassword: boolean;
+  hasTotp: boolean;
+  passkeys: PasskeyInfo[];
+};
+
+/** Card fields that are not secret, plus which secrets it holds. */
+export type CardDetail = {
+  cardholderName: string | null;
+  brand: string | null;
+  /** `1`–`12`. */
+  expMonth: string | null;
+  /** Four digits. */
+  expYear: string | null;
+  hasNumber: boolean;
+  hasCode: boolean;
+};
+
+/** Identity fields that are not secret, plus which secrets it holds. */
+export type IdentityDetail = {
+  title: string | null;
+  firstName: string | null;
+  middleName: string | null;
+  lastName: string | null;
+  address1: string | null;
+  address2: string | null;
+  address3: string | null;
+  city: string | null;
+  state: string | null;
+  postalCode: string | null;
+  country: string | null;
+  company: string | null;
+  email: string | null;
+  phone: string | null;
+  username: string | null;
+  hasSsn: boolean;
+  hasPassportNumber: boolean;
+  hasLicenseNumber: boolean;
+};
+
+/** SSH key fields that are not secret. */
+export type SshKeyDetail = {
+  publicKey: string | null;
+  keyFingerprint: string | null;
+  hasPrivateKey: boolean;
+};
+
+type ItemBase = {
+  id: string;
+  name: string;
+  folderId: string | null;
+  favorite: boolean;
+  /** True when the item's notes are non-empty; the text itself is revealed on demand. */
+  hasNotes: boolean;
+  fields: CustomField[];
+  revisionDate: string | null;
+};
+
+/** One vault item for list and detail. Never carries a secret value. */
+export type Item = ItemBase &
+  (
+    | { type: "login"; login: LoginDetail }
+    | { type: "note" }
+    | { type: "card"; card: CardDetail }
+    | { type: "identity"; identity: IdentityDetail }
+    | { type: "sshKey"; sshKey: SshKeyDetail }
+  );
+
+/** A vault folder. */
+export type Folder = {
+  id: string;
+  name: string;
+};
+
+/** Optional list filters applied to the in-memory catalog. */
 export type ItemFilter = {
   q?: string | undefined;
   uri?: string | undefined;
-  kind?: ItemKind | undefined;
+  type?: ItemType | undefined;
 };
 
-/** Metadata for a vault item. Never includes password, totp, notes body, or keys. */
-export type ItemRecord = {
-  id: string;
+/** Login fields on create. Omitted `password` is generated (`length` / `special`). */
+export type LoginInput = {
+  username?: string | undefined;
+  password?: string | undefined;
+  totp?: string | undefined;
+  uris?: Array<{ uri: string; match?: UriMatch | undefined }> | undefined;
+  length?: number | undefined;
+  special?: boolean | undefined;
+};
+
+/** Card fields on write. */
+export type CardInput = {
+  cardholderName?: string | undefined;
+  brand?: string | undefined;
+  number?: string | undefined;
+  expMonth?: string | undefined;
+  expYear?: string | undefined;
+  code?: string | undefined;
+};
+
+/** Identity fields on write. */
+export type IdentityInput = {
+  title?: string | undefined;
+  firstName?: string | undefined;
+  middleName?: string | undefined;
+  lastName?: string | undefined;
+  address1?: string | undefined;
+  address2?: string | undefined;
+  address3?: string | undefined;
+  city?: string | undefined;
+  state?: string | undefined;
+  postalCode?: string | undefined;
+  country?: string | undefined;
+  company?: string | undefined;
+  email?: string | undefined;
+  phone?: string | undefined;
+  username?: string | undefined;
+  ssn?: string | undefined;
+  passportNumber?: string | undefined;
+  licenseNumber?: string | undefined;
+};
+
+/** SSH key fields on write; all three together, or none on create to generate an Ed25519 key. */
+export type SshKeyInput = {
+  privateKey?: string | undefined;
+  publicKey?: string | undefined;
+  keyFingerprint?: string | undefined;
+};
+
+type CreateBase = {
   name: string;
-  kind: ItemKind;
-  username: string | null;
-  uris: string[];
-  /** True when a login stores a FIDO2 passkey. Always false for notes/secrets. */
-  hasPasskey: boolean;
+  folderId?: string | null | undefined;
+  favorite?: boolean | undefined;
+  notes?: string | undefined;
+  fields?: CustomFieldInput[] | undefined;
+};
+
+/** Body for `POST /v1/items`. */
+export type CreateItemInput = CreateBase &
+  (
+    | { type: "login"; login?: LoginInput | undefined }
+    | { type: "note" }
+    | { type: "card"; card?: CardInput | undefined }
+    | { type: "identity"; identity?: IdentityInput | undefined }
+    | { type: "sshKey"; sshKey?: SshKeyInput | undefined }
+  );
+
+/**
+ * Body for `PATCH /v1/items/:id`. Only given keys change; an empty string clears an optional
+ * value. `fields` replaces the whole list. The type object must match the item's type.
+ * `folderId` alone moves the item.
+ */
+export type UpdateItemInput = {
+  name?: string | undefined;
+  folderId?: string | null | undefined;
+  favorite?: boolean | undefined;
+  notes?: string | undefined;
+  fields?: CustomFieldInput[] | undefined;
+  login?: Omit<LoginInput, "length" | "special"> | undefined;
+  card?: CardInput | undefined;
+  identity?: IdentityInput | undefined;
+  sshKey?: SshKeyInput | undefined;
+};
+
+/** A secret an item can reveal, by item type. */
+export type SecretField =
+  | "password"
+  | "totp"
+  | "number"
+  | "code"
+  | "ssn"
+  | "passportNumber"
+  | "licenseNumber"
+  | "privateKey"
+  | "notes";
+
+/** Body for `POST /v1/items/:id/reveal`: a named secret, or a hidden custom field by name. */
+export type RevealRequest = { field: SecretField } | { field: "custom"; name: string };
+
+/** One decrypted value. */
+export type SecretValue = {
+  value: string;
+};
+
+/** Current one-time code of a login (`POST /v1/items/:id/totp`). */
+export type TotpCode = {
+  code: string;
+  /** Seconds per code. */
+  period: number;
+  /** Seconds until this code expires. */
+  remaining: number;
 };
 
 /** Username + password for a login item (`POST /v1/items/:id/login`). */
@@ -27,33 +271,14 @@ export type LoginCredential = {
   password: string;
 };
 
-/** Opaque secret value (`POST /v1/items/:id/secret`). */
-export type SecretValue = {
-  value: string;
-};
-
-/**
- * Fields for `POST /v1/logins`.
- * When `password` is omitted the vault generates one (`length` / `special`).
- */
-export type CreateLoginInput = {
-  name: string;
-  username: string;
-  uri?: string | undefined;
-  password?: string | undefined;
-  length?: number | undefined;
-  special?: boolean | undefined;
-};
-
-/**
- * Fields for `PATCH /v1/items/:id` on a login.
- * At least one field is required; omitted password leaves the stored one unchanged.
- */
-export type UpdateLoginInput = {
-  name?: string | undefined;
-  username?: string | undefined;
-  uri?: string | undefined;
-  password?: string | undefined;
+/** Decrypted card for a fill (`POST /v1/items/:id/card`). */
+export type CardCredential = {
+  cardholderName: string | null;
+  brand: string | null;
+  number: string;
+  expMonth: string | null;
+  expYear: string | null;
+  code: string | null;
 };
 
 /**
@@ -67,4 +292,17 @@ export type PasskeyCredential = {
   userHandle: string;
   signCount: number;
   resident: boolean;
+};
+
+/** Body for `PUT /v1/secrets/:name`. */
+export type SaveSecretInput = {
+  value: string;
+  notes?: string | undefined;
+};
+
+/** Result of `PUT /v1/secrets/:name`. */
+export type SavedSecret = {
+  item: Item;
+  /** True when no Secure Note had that name and one was created. */
+  created: boolean;
 };

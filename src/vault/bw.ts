@@ -1,117 +1,86 @@
 /**
- * Bitwarden CLI vault: Chaavi owns an in-memory catalog; Vaultwarden is
- * durability. `bw` is the crypto/transport driver (unlock, sync, create, edit,
- * delete, get).
+ * Bitwarden CLI vault: Chaavi owns an in-memory catalog of items and folders; Vaultwarden
+ * is durability. `bw` is the crypto/transport driver (unlock, sync, create, edit, delete, get).
  */
 
 import { spawn } from "node:child_process";
-import { join } from "node:path";
 import { missingVaultCredential, type Config } from "../config.js";
 import { ChaaviError } from "../errors.js";
 import type { Logger } from "../logging.js";
 import type {
-  CreateLoginInput,
+  CardCredential,
+  CreateItemInput,
+  Folder,
+  Item,
   ItemFilter,
-  ItemKind,
-  ItemRecord,
   LoginCredential,
   PasskeyCredential,
+  RevealRequest,
+  SaveSecretInput,
+  SavedSecret,
   SecretValue,
-  UpdateLoginInput,
+  TotpCode,
+  UpdateItemInput,
 } from "../types/domain.js";
 import type { Vault } from "./index.js";
 import {
-  DEFAULT_PASSWORD_LENGTH,
-  generateLoginPassword,
-} from "./password.js";
+  applySecret,
+  applyUpdate,
+  cardFromCipher,
+  cipherForCreate,
+  filterItems,
+  itemFromCipher,
+  itemTypeOf,
+  loginFromCipher,
+  noteSecretFromCipher,
+  passkeyFromCipher,
+  revealFromCipher,
+  secretNoteForCreate,
+  totpFromCipher,
+  unreachable,
+  upsertItem,
+  type Cipher,
+} from "./cipher.js";
 
-const CIPHER_LOGIN = 1;
-const CIPHER_SECURE_NOTE = 2;
-const CIPHER_SSH_KEY = 5;
-
-/** Keep items matching list query fields (`q` / `uri` / `kind`). */
-export function filterItems(items: ItemRecord[], filter: ItemFilter): ItemRecord[] {
-  return items.filter((item) => {
-    if (filter.kind !== undefined && item.kind !== filter.kind) {
-      return false;
-    }
-    if (filter.uri !== undefined) {
-      const needle = filter.uri.toLowerCase();
-      if (!item.uris.some((uri) => uri.toLowerCase().includes(needle))) {
-        return false;
-      }
-    }
-    if (filter.q !== undefined) {
-      const q = filter.q.toLowerCase();
-      const nameHit = item.name.toLowerCase().includes(q);
-      const userHit = item.username !== null && item.username.toLowerCase().includes(q);
-      const uriHit = item.uris.some((uri) => uri.toLowerCase().includes(q));
-      if (!nameHit && !userHit && !uriHit) {
-        return false;
-      }
-    }
-    return true;
-  });
-}
-
-/** Replace or append an item in the catalog by id. */
-export function upsertItem(items: ItemRecord[], item: ItemRecord): ItemRecord[] {
-  const index = items.findIndex((entry) => entry.id === item.id);
-  if (index === -1) {
-    return [...items, item];
-  }
-  const next = items.slice();
-  next[index] = item;
-  return next;
-}
-
-type Cipher = {
-  id?: unknown;
-  name?: unknown;
-  type?: unknown;
-  notes?: unknown;
-  login?: {
-    username?: unknown;
-    password?: unknown;
-    uris?: Array<{ uri?: unknown }>;
-    fido2Credentials?: unknown;
-  };
-  sshKey?: {
-    privateKey?: unknown;
-  };
-};
-
-type BwExec = {
+/** One finished `bw` process. */
+export type BwExec = {
   stdout: string;
   stderr: string;
+  /** Exit code; null when the process was killed on timeout. */
   code: number | null;
 };
 
+/** Runs `bw` with argv and env. Never logs stdout. */
+export type BwRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise<BwExec>;
+
 /**
- * Vault backed by `@bitwarden/cli` (`bw`). Catalog metadata lives in process
- * memory and refreshes on a background sync loop. Reveal paths decrypt on
- * demand from the CLI cache; secrets are never stored in the catalog.
+ * Vault backed by `@bitwarden/cli`. Catalog metadata lives in process memory and refreshes
+ * on a background sync loop. Reveal paths decrypt on demand from the CLI cache; secrets are
+ * never stored in the catalog.
  */
 export class BwVault implements Vault {
   readonly #config: Config;
-  readonly #bin: string;
+  readonly #run: BwRunner;
   readonly #log: Logger;
   #session: Promise<string> | undefined;
-  #items: ItemRecord[] = [];
+  #items: Item[] = [];
+  #folders: Folder[] = [];
+  /** Ciphers of a type Chaavi does not serve at the last pull; logged when it changes. */
+  #skipped = 0;
   #refresh: Promise<void> | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
-  /** Serializes catalog writes so a stale sync cannot overwrite a create. */
+  /** Serializes catalog writes so a stale sync cannot overwrite a write. */
   #catalogOp: Promise<unknown> = Promise.resolve();
 
-  constructor(config: Config, log: Logger) {
+  constructor(config: Config, log: Logger, run: BwRunner) {
     this.#config = config;
-    this.#bin = join(config.serviceRoot, "node_modules", ".bin", "bw");
+    this.#run = run;
     this.#log = log;
   }
 
   /**
-   * Unlock, pull the first catalog, and start the background sync loop when
-   * vault env is complete. No-op when unconfigured (health stays unconfigured).
+   * Unlock, pull the first catalog, and start the background sync loop when vault env is
+   * complete. No-op when unconfigured (health stays unconfigured).
    * @throws When vault env is set but the first sync fails.
    */
   async start(): Promise<void> {
@@ -135,21 +104,151 @@ export class BwVault implements Vault {
         await this.#refresh;
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
-        this.#log.warn("vault sync aborted on shutdown", {
-          code: "vault_unreachable",
-          err: message,
-        });
+        this.#log.warn("vault sync aborted on shutdown", { code: "vault_unreachable", err: message });
       }
     }
   }
 
-  async listItems(filter: ItemFilter): Promise<ItemRecord[]> {
+  async listItems(filter: ItemFilter): Promise<Item[]> {
     this.requireConfigured();
     return filterItems(this.#items, filter);
   }
 
-  async getItem(id: string): Promise<ItemRecord> {
+  async getItem(id: string): Promise<Item> {
     this.requireConfigured();
+    return this.catalogItem(id);
+  }
+
+  async createItem(input: CreateItemInput): Promise<Item> {
+    this.requireConfigured();
+    return this.#withCatalog(async () => {
+      this.requireFolder(input.folderId);
+      return this.writeCipher(["create", "item"], cipherForCreate(input));
+    });
+  }
+
+  async updateItem(id: string, input: UpdateItemInput): Promise<Item> {
+    this.requireConfigured();
+    return this.#withCatalog(async () => {
+      this.requireFolder(input.folderId);
+      const cipher = await this.getCipher(id);
+      return this.writeCipher(["edit", "item", id], applyUpdate(cipher, input));
+    });
+  }
+
+  async deleteItem(id: string): Promise<void> {
+    this.requireConfigured();
+    return this.#withCatalog(async () => {
+      this.catalogItem(id);
+      await this.bw(["delete", "item", id], { session: true, notFound: true });
+      this.#items = this.#items.filter((entry) => entry.id !== id);
+    });
+  }
+
+  async reveal(id: string, request: RevealRequest): Promise<SecretValue> {
+    return revealFromCipher(await this.getCipher(id), request);
+  }
+
+  async getTotp(id: string): Promise<TotpCode> {
+    return totpFromCipher(await this.getCipher(id), Date.now());
+  }
+
+  async getLogin(id: string): Promise<LoginCredential> {
+    return loginFromCipher(await this.getCipher(id));
+  }
+
+  async getCard(id: string): Promise<CardCredential> {
+    return cardFromCipher(await this.getCipher(id));
+  }
+
+  async getPasskey(id: string): Promise<PasskeyCredential> {
+    return passkeyFromCipher(await this.getCipher(id));
+  }
+
+  async listFolders(): Promise<Folder[]> {
+    this.requireConfigured();
+    return this.#folders;
+  }
+
+  async createFolder(name: string): Promise<Folder> {
+    this.requireConfigured();
+    return this.#withCatalog(async () => {
+      const raw = await this.bw(["create", "folder", encode({ name })], { session: true });
+      const folder = folderFrom(parseJson(raw));
+      this.#folders = [...this.#folders, folder];
+      return folder;
+    });
+  }
+
+  async renameFolder(id: string, name: string): Promise<Folder> {
+    this.requireConfigured();
+    return this.#withCatalog(async () => {
+      this.catalogFolder(id);
+      const raw = await this.bw(["edit", "folder", id, encode({ name })], { session: true, notFound: true });
+      const folder = folderFrom(parseJson(raw));
+      this.#folders = this.#folders.map((entry) => (entry.id === id ? folder : entry));
+      return folder;
+    });
+  }
+
+  /** Delete a folder; Vaultwarden moves its items to no folder, and so does the catalog. */
+  async deleteFolder(id: string): Promise<void> {
+    this.requireConfigured();
+    return this.#withCatalog(async () => {
+      this.catalogFolder(id);
+      await this.bw(["delete", "folder", id], { session: true, notFound: true });
+      this.#folders = this.#folders.filter((entry) => entry.id !== id);
+      this.#items = this.#items.map((item) => (item.folderId === id ? { ...item, folderId: null } : item));
+    });
+  }
+
+  /** Create or update the Secure Note named `name` with its hidden `Secret` field set to the value. */
+  async saveSecret(name: string, input: SaveSecretInput): Promise<SavedSecret> {
+    this.requireConfigured();
+    return this.#withCatalog(async () => {
+      const existing = this.secretNotes(name);
+      if (existing.length === 0) {
+        const item = await this.writeCipher(["create", "item"], secretNoteForCreate(name, input.value, input.notes));
+        return { item, created: true };
+      }
+      if (existing.length > 1) {
+        throw new ChaaviError(409, "conflict", `${existing.length} secure notes are named "${name}"`);
+      }
+      const id = existing[0]!.id;
+      const cipher = await this.getCipher(id);
+      const item = await this.writeCipher(["edit", "item", id], applySecret(cipher, input.value, input.notes));
+      return { item, created: false };
+    });
+  }
+
+  /** The hidden `Secret` field of the one Secure Note named `name` (case-insensitive). */
+  async revealSecret(name: string): Promise<SecretValue> {
+    this.requireConfigured();
+    const notes = this.secretNotes(name);
+    if (notes.length === 0) {
+      throw new ChaaviError(404, "not_found", `no secure note is named "${name}"`);
+    }
+    if (notes.length > 1) {
+      throw new ChaaviError(409, "conflict", `${notes.length} secure notes are named "${name}"`);
+    }
+    return noteSecretFromCipher(await this.getCipher(notes[0]!.id));
+  }
+
+  /** Secure Notes whose name equals `name`, ignoring case. */
+  secretNotes(name: string): Item[] {
+    const needle = name.toLowerCase();
+    return this.#items.filter((item) => item.type === "note" && item.name.toLowerCase() === needle);
+  }
+
+  /** Run a create or edit with `cipher`, then upsert the catalog with what `bw` returns. */
+  async writeCipher(command: string[], cipher: Cipher): Promise<Item> {
+    const raw = await this.bw([...command, encode(cipher)], { session: true, notFound: command[0] === "edit" });
+    const item = itemFromCipher(asCipher(parseJson(raw)));
+    this.#items = upsertItem(this.#items, item);
+    return item;
+  }
+
+  catalogItem(id: string): Item {
     const item = this.#items.find((entry) => entry.id === id);
     if (item === undefined) {
       throw new ChaaviError(404, "not_found", "item not found");
@@ -157,92 +256,19 @@ export class BwVault implements Vault {
     return item;
   }
 
-  async createLogin(input: CreateLoginInput): Promise<ItemRecord> {
-    this.requireConfigured();
-    return this.#withCatalog(async () => {
-      const password =
-        input.password !== undefined
-          ? input.password
-          : generateLoginPassword({
-              length: input.length ?? DEFAULT_PASSWORD_LENGTH,
-              special: input.special ?? true,
-            });
-      const payload = {
-        type: CIPHER_LOGIN,
-        name: input.name,
-        favorite: false,
-        reprompt: 0,
-        login: {
-          username: input.username,
-          password,
-          uris: input.uri !== undefined ? [{ uri: input.uri }] : [],
-        },
-      };
-      const encoded = Buffer.from(JSON.stringify(payload)).toString("base64");
-      const raw = await this.bw(["create", "item", encoded], { session: true });
-      const record = itemRecordFromCipher(asCipher(parseJson(raw)));
-      this.#items = upsertItem(this.#items, record);
-      return record;
-    });
+  catalogFolder(id: string): Folder {
+    const folder = this.#folders.find((entry) => entry.id === id);
+    if (folder === undefined) {
+      throw new ChaaviError(404, "not_found", "folder not found");
+    }
+    return folder;
   }
 
-  async updateLogin(id: string, input: UpdateLoginInput): Promise<ItemRecord> {
-    this.requireConfigured();
-    return this.#withCatalog(async () => {
-      const cipher = await this.getCipher(id);
-      if (numericType(cipher) !== CIPHER_LOGIN) {
-        throw new ChaaviError(422, "invalid_request", "item is not a login");
-      }
-      if (input.name !== undefined) {
-        cipher.name = input.name;
-      }
-      const login = cipher.login ?? {};
-      cipher.login = login;
-      if (input.username !== undefined) {
-        login.username = input.username;
-      }
-      if (input.password !== undefined) {
-        login.password = input.password;
-      }
-      if (input.uri !== undefined) {
-        login.uris = input.uri.length > 0 ? [{ uri: input.uri }] : [];
-      }
-      const encoded = Buffer.from(JSON.stringify(cipher)).toString("base64");
-      const raw = await this.bw(["edit", "item", id, encoded], { session: true });
-      const record = itemRecordFromCipher(asCipher(parseJson(raw)));
-      this.#items = upsertItem(this.#items, record);
-      return record;
-    });
-  }
-
-  async deleteItem(id: string): Promise<void> {
-    this.requireConfigured();
-    return this.#withCatalog(async () => {
-      const existing = this.#items.find((entry) => entry.id === id);
-      if (existing === undefined) {
-        throw new ChaaviError(404, "not_found", "item not found");
-      }
-      if (existing.kind !== "login") {
-        throw new ChaaviError(422, "invalid_request", "item is not a login");
-      }
-      await this.bw(["delete", "item", id], { session: true, notFound: true });
-      this.#items = this.#items.filter((entry) => entry.id !== id);
-    });
-  }
-
-  async getLogin(id: string): Promise<LoginCredential> {
-    const cipher = await this.getCipher(id);
-    return loginFromCipher(cipher);
-  }
-
-  async getPasskey(id: string): Promise<PasskeyCredential> {
-    const cipher = await this.getCipher(id);
-    return passkeyFromCipher(cipher);
-  }
-
-  async getSecret(id: string): Promise<SecretValue> {
-    const cipher = await this.getCipher(id);
-    return secretFromCipher(cipher);
+  /** A folder id in a write body must name a catalog folder; null or absent is no folder. */
+  requireFolder(folderId: string | null | undefined): void {
+    if (folderId !== undefined && folderId !== null && !this.#folders.some((entry) => entry.id === folderId)) {
+      throw new ChaaviError(422, "invalid_request", "folderId does not name a folder");
+    }
   }
 
   /** Fetch one cipher by id from the CLI cache; map CLI "Not found." to 404. */
@@ -253,8 +279,8 @@ export class BwVault implements Vault {
   }
 
   /**
-   * Background tick: pull Vaultwarden into the CLI cache and replace the
-   * catalog. Failures are logged; the next tick retries.
+   * Background tick: pull Vaultwarden into the CLI cache and replace the catalog. Failures
+   * are logged; the next tick retries.
    */
   async tick(): Promise<void> {
     try {
@@ -266,8 +292,8 @@ export class BwVault implements Vault {
   }
 
   /**
-   * Coalesced `bw sync` + `bw list items` into `#items`. Concurrent callers
-   * share one in-flight refresh; create/login waits on the same queue.
+   * Coalesced `bw sync` + list into the catalog. Concurrent callers share one in-flight
+   * refresh; writes wait on the same queue.
    */
   refreshCatalog(): Promise<void> {
     if (this.#refresh === undefined) {
@@ -278,25 +304,46 @@ export class BwVault implements Vault {
     return this.#refresh;
   }
 
-  /** Sync from Vaultwarden and replace the in-memory catalog. */
+  /**
+   * Sync from Vaultwarden and replace the in-memory catalog. Ciphers of a Bitwarden type
+   * Chaavi does not serve (bank accounts, driver's licenses) are left out and counted in a
+   * warn line whenever their number changes.
+   */
   async pullCatalog(): Promise<void> {
     await this.bw(["sync"], { session: true });
-    const raw = await this.bw(["list", "items"], { session: true });
-    const parsed: unknown = parseJson(raw);
-    if (!Array.isArray(parsed)) {
+    const rawItems = parseJson(await this.bw(["list", "items"], { session: true }));
+    const rawFolders = parseJson(await this.bw(["list", "folders"], { session: true }));
+    if (!Array.isArray(rawItems) || !Array.isArray(rawFolders)) {
       throw unreachable("vault returned invalid json");
     }
-    const items: ItemRecord[] = [];
-    for (const entry of parsed) {
-      items.push(itemRecordFromCipher(asCipher(entry)));
+    const items: Item[] = [];
+    let skipped = 0;
+    for (const entry of rawItems) {
+      const cipher = asCipher(entry);
+      if (itemTypeOf(cipher) === null) {
+        skipped += 1;
+        continue;
+      }
+      items.push(itemFromCipher(cipher));
+    }
+    const folders: Folder[] = [];
+    for (const entry of rawFolders) {
+      if (typeof entry === "object" && entry !== null && (entry as { id?: unknown }).id !== null) {
+        folders.push(folderFrom(entry));
+      }
+    }
+    if (skipped !== this.#skipped) {
+      this.#skipped = skipped;
+      this.#log.warn("vault items of an unsupported type left out", { code: "unsupported_item_type", count: skipped });
     }
     this.#items = items;
-    this.#log.debug("vault catalog refreshed", { items: items.length });
+    this.#folders = folders;
+    this.#log.debug("vault catalog refreshed", { items: items.length, folders: folders.length });
   }
 
   /**
-   * Run `fn` alone against `#items` so a sync cannot finish between a create
-   * and its local upsert (or wipe a just-created row).
+   * Run `fn` alone against the catalog so a sync cannot finish between a write and its local
+   * upsert (or wipe a just-written row).
    */
   #withCatalog<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.#catalogOp.then(fn, fn);
@@ -316,8 +363,8 @@ export class BwVault implements Vault {
   }
 
   /**
-   * Lazy `bw config` / `login --apikey` / `unlock --raw`. Concurrent callers
-   * share one promise; a failed attempt is cleared so the next call retries.
+   * Lazy `bw config` / `login --apikey` / `unlock --raw`. Concurrent callers share one
+   * promise; a failed attempt is cleared so the next call retries.
    */
   session(): Promise<string> {
     if (!this.#session) {
@@ -331,18 +378,12 @@ export class BwVault implements Vault {
 
   /** `bw config server`, `login --apikey`, `unlock --passwordenv BW_PASSWORD --raw`. */
   async unlockOnce(): Promise<string> {
-    const missing = missingVaultCredential(this.#config);
-    if (missing !== undefined) {
-      throw new ChaaviError(503, "vault_unconfigured", `${missing} is not set`);
-    }
+    this.requireConfigured();
     const creds = this.#config.env.bw;
     await this.ensureServer(this.#config.env.vaultUrl);
     await this.bw(["login", "--apikey"], {
       session: false,
-      extraEnv: {
-        BW_CLIENTID: creds.clientId,
-        BW_CLIENTSECRET: creds.clientSecret,
-      },
+      extraEnv: { BW_CLIENTID: creds.clientId, BW_CLIENTSECRET: creds.clientSecret },
       alreadyLoggedInOk: true,
     });
     const session = await this.bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], {
@@ -357,8 +398,8 @@ export class BwVault implements Vault {
   }
 
   /**
-   * Point `bw` at `url`. A second start is already logged in, and `bw config server`
-   * then exits with "Logout required" even when the saved URL matches.
+   * Point `bw` at `url`. A second start is already logged in, and `bw config server` then
+   * exits with "Logout required" even when the saved URL matches.
    */
   async ensureServer(url: string): Promise<void> {
     await this.bw(["config", "server", url], { session: false, serverUnchangedOk: true });
@@ -371,8 +412,8 @@ export class BwVault implements Vault {
   }
 
   /**
-   * Run `bw --nointeraction …`. Never logs stdout. Error messages omit
-   * session, password, and CLI stdout.
+   * Run `bw --nointeraction …`. Never logs stdout. Error messages omit session, password,
+   * and CLI stdout.
    */
   async bw(
     args: string[],
@@ -398,7 +439,7 @@ export class BwVault implements Vault {
     }
     let result: BwExec;
     try {
-      result = await runBw(this.#bin, argv, env, this.#config.vault.timeout_ms);
+      result = await this.#run(argv, env);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       throw unreachable(sanitize(message));
@@ -407,15 +448,12 @@ export class BwVault implements Vault {
       return result.stdout;
     }
     if (opts.notFound && /not found/i.test(result.stderr)) {
-      throw new ChaaviError(404, "not_found", "item not found");
+      throw new ChaaviError(404, "not_found", `${args[1] === "folder" ? "folder" : "item"} not found`);
     }
     if (opts.alreadyLoggedInOk && /already logged in/i.test(result.stderr)) {
       return "";
     }
-    if (
-      opts.serverUnchangedOk &&
-      /logout required before server config update/i.test(result.stderr)
-    ) {
+    if (opts.serverUnchangedOk && /logout required before server config update/i.test(result.stderr)) {
       return "";
     }
     if (opts.logoutOk && /not logged in/i.test(result.stderr)) {
@@ -424,241 +462,54 @@ export class BwVault implements Vault {
     if (result.code === null) {
       throw unreachable("vault command timed out");
     }
-    throw unreachable("vault command failed");
+    throw unreachable(`vault command failed: ${sanitize(firstLine(result.stderr))}`);
   }
-}
-
-/** Map a Bitwarden cipher to list/detail metadata (no secrets). */
-export function itemRecordFromCipher(cipher: Cipher): ItemRecord {
-  const id = typeof cipher.id === "string" ? cipher.id : "";
-  if (id.length === 0) {
-    throw unreachable("vault item missing id");
-  }
-  const kind = kindOf(cipher);
-  const username =
-    kind === "login" && typeof cipher.login?.username === "string" ? cipher.login.username : null;
-  const uris = kind === "login" ? loginUris(cipher) : [];
-  return {
-    id,
-    name: typeof cipher.name === "string" ? cipher.name : "",
-    kind,
-    username,
-    uris,
-    hasPasskey: kind === "login" && fido2List(cipher).length > 0,
-  };
 }
 
 /**
- * First FIDO2 credential on a login cipher, encoded for Chrome
- * `WebAuthn.addCredential` (standard base64 PKCS#8 / credential id / user handle).
+ * Runner that spawns the `bw` binary with a wall-clock timeout. Stdout is returned to the
+ * caller only; this helper does not log it.
  */
-export function passkeyFromCipher(cipher: Cipher): PasskeyCredential {
-  if (numericType(cipher) !== CIPHER_LOGIN) {
-    throw new ChaaviError(422, "invalid_request", "item is not a login");
-  }
-  const raw = fido2List(cipher)[0];
-  if (raw === undefined) {
-    throw new ChaaviError(422, "invalid_request", "item has no passkey");
-  }
-  const rpId = requiredString(raw.rpId, "passkey is missing rpId");
-  const keyAlgorithm = typeof raw.keyAlgorithm === "string" ? raw.keyAlgorithm : "";
-  const keyCurve = typeof raw.keyCurve === "string" ? raw.keyCurve : "";
-  if (keyAlgorithm !== "ECDSA" || keyCurve !== "P-256") {
-    throw new ChaaviError(422, "invalid_request", "passkey is not ECDSA P-256");
-  }
-  const privateKey = stdB64(decodeBitwardenBytes(raw.keyValue, "passkey private key"));
-  const credentialId = stdB64(decodeCredentialId(raw.credentialId));
-  const resident = parseDiscoverable(raw.discoverable);
-  const userHandleRaw = decodeOptionalBytes(raw.userHandle);
-  if (resident && userHandleRaw.length === 0) {
-    throw new ChaaviError(422, "invalid_request", "passkey is missing userHandle");
-  }
-  return {
-    credentialId,
-    rpId,
-    privateKey,
-    userHandle: stdB64(userHandleRaw),
-    signCount: parseCounter(raw.counter),
-    resident,
-  };
+export function spawnBwRunner(bin: string, timeoutMs: number): BwRunner {
+  return (args, env) =>
+    new Promise((resolve, reject) => {
+      const child = spawn(bin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+      }, timeoutMs);
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolve({ stdout, stderr, code });
+      });
+    });
 }
 
-/** Username + password for a login cipher. */
-export function loginFromCipher(cipher: Cipher): LoginCredential {
-  if (numericType(cipher) !== CIPHER_LOGIN) {
-    throw new ChaaviError(422, "invalid_request", "item is not a login");
-  }
-  const password = typeof cipher.login?.password === "string" ? cipher.login.password : "";
-  if (password.length === 0) {
-    throw new ChaaviError(422, "invalid_request", "item has no password");
-  }
-  const username = typeof cipher.login?.username === "string" ? cipher.login.username : "";
-  return { username, password };
+/** Base64 JSON, the form `bw create` and `bw edit` take. */
+function encode(value: unknown): string {
+  return Buffer.from(JSON.stringify(value)).toString("base64");
 }
 
-/**
- * Secret value: login password, secure-note notes, or a single secret field
- * (SSH private key). Other types with multiple secret fields fail.
- */
-export function secretFromCipher(cipher: Cipher): SecretValue {
-  const type = numericType(cipher);
-  if (type === CIPHER_LOGIN) {
-    const password = typeof cipher.login?.password === "string" ? cipher.login.password : "";
-    if (password.length === 0) {
-      throw new ChaaviError(422, "invalid_request", "item has no secret");
-    }
-    return { value: password };
+/** A folder from `bw` JSON. */
+function folderFrom(value: unknown): Folder {
+  const raw = value as { id?: unknown; name?: unknown };
+  if (typeof raw !== "object" || raw === null || typeof raw.id !== "string" || typeof raw.name !== "string") {
+    throw unreachable("vault returned an invalid folder");
   }
-  if (type === CIPHER_SECURE_NOTE) {
-    const notes = typeof cipher.notes === "string" ? cipher.notes : "";
-    if (notes.length === 0) {
-      throw new ChaaviError(422, "invalid_request", "item has no secret");
-    }
-    return { value: notes };
-  }
-  if (type === CIPHER_SSH_KEY) {
-    const privateKey = typeof cipher.sshKey?.privateKey === "string" ? cipher.sshKey.privateKey : "";
-    if (privateKey.length === 0) {
-      throw new ChaaviError(422, "invalid_request", "item has no secret");
-    }
-    return { value: privateKey };
-  }
-  throw new ChaaviError(422, "invalid_request", "item has no single secret field");
-}
-
-/** Bitwarden type 1 → login, 2 → note, else secret. */
-function kindOf(cipher: Cipher): ItemKind {
-  const type = numericType(cipher);
-  if (type === CIPHER_LOGIN) {
-    return "login";
-  }
-  if (type === CIPHER_SECURE_NOTE) {
-    return "note";
-  }
-  return "secret";
-}
-
-/** Coerce Bitwarden `type` (number or numeric string) to a number. */
-function numericType(cipher: Cipher): number {
-  return typeof cipher.type === "number" ? cipher.type : Number(cipher.type);
-}
-
-/** Collect non-empty login URI strings from a cipher. */
-function loginUris(cipher: Cipher): string[] {
-  const uris = cipher.login?.uris;
-  if (!Array.isArray(uris)) {
-    return [];
-  }
-  const out: string[] = [];
-  for (const entry of uris) {
-    if (typeof entry.uri === "string" && entry.uri.length > 0) {
-      out.push(entry.uri);
-    }
-  }
-  return out;
-}
-
-type Fido2Raw = {
-  credentialId?: unknown;
-  keyAlgorithm?: unknown;
-  keyCurve?: unknown;
-  keyValue?: unknown;
-  rpId?: unknown;
-  userHandle?: unknown;
-  counter?: unknown;
-  discoverable?: unknown;
-};
-
-/** Non-empty FIDO2 credential objects on a login cipher. */
-function fido2List(cipher: Cipher): Fido2Raw[] {
-  const raw = cipher.login?.fido2Credentials;
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-  const out: Fido2Raw[] = [];
-  for (const entry of raw) {
-    if (typeof entry === "object" && entry !== null) {
-      out.push(entry as Fido2Raw);
-    }
-  }
-  return out;
-}
-
-/** Decode Bitwarden's credentialId: UUID hex bytes, or FIDO2 base64url. */
-function decodeCredentialId(value: unknown): Buffer {
-  const text = requiredString(value, "passkey is missing credentialId");
-  const guid = guidBytes(text);
-  if (guid !== undefined) {
-    return guid;
-  }
-  return decodeBitwardenBytes(text, "passkey credentialId");
-}
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** 16-byte form of a hyphenated UUID, or undefined when `value` is not one. */
-function guidBytes(value: string): Buffer | undefined {
-  if (!UUID_RE.test(value)) {
-    return undefined;
-  }
-  return Buffer.from(value.replaceAll("-", ""), "hex");
-}
-
-/** Decode a Bitwarden FIDO2 string (URL-safe base64, optional padding). */
-function decodeBitwardenBytes(value: unknown, label: string): Buffer {
-  const text = requiredString(value, `${label} is missing`);
-  const buf = Buffer.from(text, "base64url");
-  if (buf.length === 0) {
-    throw new ChaaviError(422, "invalid_request", `${label} is not valid base64`);
-  }
-  return buf;
-}
-
-/** Decode an optional Bitwarden FIDO2 string; empty when absent. */
-function decodeOptionalBytes(value: unknown): Buffer {
-  if (typeof value !== "string" || value.length === 0) {
-    return Buffer.alloc(0);
-  }
-  const buf = Buffer.from(value, "base64url");
-  if (buf.length === 0) {
-    throw new ChaaviError(422, "invalid_request", "passkey userHandle is not valid base64");
-  }
-  return buf;
-}
-
-function requiredString(value: unknown, message: string): string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new ChaaviError(422, "invalid_request", message);
-  }
-  return value;
-}
-
-function stdB64(buf: Buffer): string {
-  return buf.toString("base64");
-}
-
-function parseCounter(value: unknown): number {
-  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
-    return value;
-  }
-  if (typeof value === "string" && value.length > 0) {
-    const n = Number(value);
-    if (Number.isInteger(n) && n >= 0) {
-      return n;
-    }
-  }
-  throw new ChaaviError(422, "invalid_request", "passkey is missing counter");
-}
-
-function parseDiscoverable(value: unknown): boolean {
-  if (value === true || value === "true") {
-    return true;
-  }
-  if (value === false || value === "false") {
-    return false;
-  }
-  throw new ChaaviError(422, "invalid_request", "passkey is missing discoverable");
+  return { id: raw.id, name: raw.name };
 }
 
 /** Narrow CLI JSON to a cipher object. */
@@ -678,51 +529,13 @@ function parseJson(raw: string): unknown {
   }
 }
 
-/** Build a 502 vault_unreachable error (CLI/protocol failure). */
-function unreachable(message: string): ChaaviError {
-  return new ChaaviError(502, "vault_unreachable", message);
+/** First non-empty line of CLI stderr, which names why a command failed. */
+function firstLine(stderr: string): string {
+  const line = stderr.split("\n").find((entry) => entry.trim().length > 0);
+  return line === undefined ? `exit without a message` : line.trim();
 }
 
-/** Strip session-like tokens from a spawn error before it becomes HTTP JSON. */
+/** Strip session-like tokens from an error before it becomes HTTP JSON. */
 function sanitize(message: string): string {
   return message.replace(/[A-Za-z0-9+/=]{20,}/g, "[redacted]");
-}
-
-/**
- * Spawn `bw` with a wall-clock timeout. Stdout is returned to the caller only;
- * this helper does not log it.
- */
-function runBw(
-  bin: string,
-  args: string[],
-  env: NodeJS.ProcessEnv,
-  timeoutMs: number,
-): Promise<BwExec> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, {
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-    }, timeoutMs);
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ stdout, stderr, code });
-    });
-  });
 }

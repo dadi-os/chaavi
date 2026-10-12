@@ -1,20 +1,11 @@
-import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOST, LOG_LEVEL, PORT } from "../src/constants.js";
 import type { Config } from "../src/config.js";
-import { ChaaviError } from "../src/errors.js";
-import type {
-  CreateLoginInput,
-  ItemFilter,
-  ItemRecord,
-  LoginCredential,
-  PasskeyCredential,
-  SecretValue,
-  UpdateLoginInput,
-} from "../src/types/domain.js";
-import { filterItems, type Vault } from "../src/vault/index.js";
-import { DEFAULT_PASSWORD_LENGTH, generateLoginPassword } from "../src/vault/password.js";
+import { HOST, LOG_LEVEL, PORT } from "../src/constants.js";
+import type { Logger } from "../src/logging.js";
+import type { BwExec } from "../src/vault/bw.js";
+import type { Cipher } from "../src/vault/cipher.js";
 
 const serviceRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -38,205 +29,251 @@ export function makeConfig(): Config {
   };
 }
 
-/** In-memory vault item including secret fields used only by reveal routes. */
-export type FakeItem = {
-  record: ItemRecord;
-  password?: string | undefined;
-  notes?: string | undefined;
-  secret?: string | undefined;
-  passkey?: PasskeyCredential | undefined;
-};
+/** Logger that keeps lines for assertions instead of printing them. */
+export function memoryLogger(): Logger & { lines: Array<{ level: string; msg: string; attrs?: Record<string, unknown> }> } {
+  const lines: Array<{ level: string; msg: string; attrs?: Record<string, unknown> }> = [];
+  const push = (level: string) => (msg: string, attrs?: Record<string, unknown>) => {
+    lines.push({ level, msg, ...(attrs !== undefined ? { attrs } : {}) });
+  };
+  return { lines, debug: push("debug"), info: push("info"), warn: push("warn"), error: push("error") };
+}
 
-/** Injectable Vault for HTTP tests (no Bitwarden CLI / Vaultwarden). */
-export class FakeVault implements Vault {
-  items: FakeItem[] = [];
+/**
+ * In-memory stand-in for the `bw` CLI: answers the commands BwVault runs (config, login,
+ * unlock, sync, list, get, create, edit, delete for items and folders) the way the CLI does,
+ * including "Not found." on stderr and the server moving a deleted folder's items out.
+ */
+export class FakeBw {
+  ciphers: Cipher[] = [];
+  folders: Array<{ id: string; name: string }> = [];
+  /** Every argv run, without `--nointeraction` and the session. */
+  calls: string[][] = [];
+  #server = "";
 
-  seed(items: FakeItem[]): void {
-    this.items = items;
+  /** Replace the vault contents. */
+  seed(ciphers: Cipher[], folders: Array<{ id: string; name: string }> = []): void {
+    this.ciphers = structuredClone(ciphers);
+    this.folders = structuredClone(folders);
   }
 
-  async start(): Promise<void> {}
-
-  async stop(): Promise<void> {}
-
-  async listItems(filter: ItemFilter): Promise<ItemRecord[]> {
-    return filterItems(
-      this.items.map((item) => item.record),
-      filter,
-    );
+  /** The cipher with this id, as stored. */
+  stored(id: string): Cipher {
+    const cipher = this.ciphers.find((entry) => entry.id === id);
+    if (cipher === undefined) {
+      throw new Error(`no stored cipher ${id}`);
+    }
+    return cipher;
   }
 
-  async getItem(id: string): Promise<ItemRecord> {
-    return this.find(id).record;
-  }
-
-  async createLogin(input: CreateLoginInput): Promise<ItemRecord> {
-    const password =
-      input.password !== undefined
-        ? input.password
-        : generateLoginPassword({
-            length: input.length ?? DEFAULT_PASSWORD_LENGTH,
-            special: input.special ?? true,
-          });
-    const record: ItemRecord = {
-      id: randomUUID(),
-      name: input.name,
-      kind: "login",
-      username: input.username,
-      uris: input.uri !== undefined ? [input.uri] : [],
-      hasPasskey: false,
-    };
-    this.items.push({ record, password });
-    return record;
-  }
-
-  async updateLogin(id: string, input: UpdateLoginInput): Promise<ItemRecord> {
-    const item = this.find(id);
-    if (item.record.kind !== "login") {
-      throw new ChaaviError(422, "invalid_request", "item is not a login");
-    }
-    if (input.name !== undefined) {
-      item.record = { ...item.record, name: input.name };
-    }
-    if (input.username !== undefined) {
-      item.record = { ...item.record, username: input.username };
-    }
-    if (input.uri !== undefined) {
-      item.record = {
-        ...item.record,
-        uris: input.uri.length > 0 ? [input.uri] : [],
-      };
-    }
-    if (input.password !== undefined) {
-      item.password = input.password;
-    }
-    return item.record;
-  }
-
-  async deleteItem(id: string): Promise<void> {
-    const item = this.find(id);
-    if (item.record.kind !== "login") {
-      throw new ChaaviError(422, "invalid_request", "item is not a login");
-    }
-    this.items = this.items.filter((entry) => entry.record.id !== id);
-  }
-
-  async getLogin(id: string): Promise<LoginCredential> {
-    const item = this.find(id);
-    if (item.record.kind !== "login") {
-      throw new ChaaviError(422, "invalid_request", "item is not a login");
-    }
-    const password = item.password ?? "";
-    if (password.length === 0) {
-      throw new ChaaviError(422, "invalid_request", "item has no password");
-    }
-    return { username: item.record.username ?? "", password };
-  }
-
-  async getPasskey(id: string): Promise<PasskeyCredential> {
-    const item = this.find(id);
-    if (item.record.kind !== "login") {
-      throw new ChaaviError(422, "invalid_request", "item is not a login");
-    }
-    if (item.passkey === undefined) {
-      throw new ChaaviError(422, "invalid_request", "item has no passkey");
-    }
-    return item.passkey;
-  }
-
-  async getSecret(id: string): Promise<SecretValue> {
-    const item = this.find(id);
-    if (item.record.kind === "login") {
-      const password = item.password ?? "";
-      if (password.length === 0) {
-        throw new ChaaviError(422, "invalid_request", "item has no secret");
+  run = async (argv: string[]): Promise<BwExec> => {
+    const args = argv.filter((arg, i) => arg !== "--nointeraction" && arg !== "--session" && argv[i - 1] !== "--session");
+    this.calls.push(args);
+    const [verb, noun, a, b] = args;
+    const ok = (value: unknown): BwExec => ({ stdout: typeof value === "string" ? value : JSON.stringify(value), stderr: "", code: 0 });
+    const notFound: BwExec = { stdout: "", stderr: "Not found.", code: 1 };
+    if (verb === "config") {
+      if (a !== undefined) {
+        this.#server = a;
       }
-      return { value: password };
+      return a === undefined && noun === "server" ? ok(this.#server) : ok("");
     }
-    if (item.record.kind === "note") {
-      const notes = item.notes ?? "";
-      if (notes.length === 0) {
-        throw new ChaaviError(422, "invalid_request", "item has no secret");
+    if (verb === "login" || verb === "sync" || verb === "logout") {
+      return ok("");
+    }
+    if (verb === "unlock") {
+      return ok("fake-session-token");
+    }
+    if (verb === "list" && noun === "items") {
+      return ok(this.ciphers);
+    }
+    if (verb === "list" && noun === "folders") {
+      return ok([{ object: "folder", id: null, name: "No Folder" }, ...this.folders]);
+    }
+    if (verb === "get" && noun === "item") {
+      const cipher = this.ciphers.find((entry) => entry.id === a);
+      return cipher === undefined ? notFound : ok(cipher);
+    }
+    if (verb === "create" && noun === "item") {
+      const cipher = { ...decode(a), id: randomUUID(), revisionDate: new Date().toISOString() };
+      this.ciphers.push(cipher);
+      return ok(cipher);
+    }
+    if (verb === "edit" && noun === "item") {
+      const index = this.ciphers.findIndex((entry) => entry.id === a);
+      if (index === -1) {
+        return notFound;
       }
-      return { value: notes };
+      const cipher = { ...decode(b), id: a, revisionDate: new Date().toISOString() };
+      this.ciphers[index] = cipher;
+      return ok(cipher);
     }
-    const secret = item.secret ?? "";
-    if (secret.length === 0) {
-      throw new ChaaviError(422, "invalid_request", "item has no single secret field");
+    if (verb === "delete" && noun === "item") {
+      const before = this.ciphers.length;
+      this.ciphers = this.ciphers.filter((entry) => entry.id !== a);
+      return before === this.ciphers.length ? notFound : ok("");
     }
-    return { value: secret };
-  }
+    if (verb === "create" && noun === "folder") {
+      const folder = { id: randomUUID(), name: String((decode(a) as { name: unknown }).name) };
+      this.folders.push(folder);
+      return ok(folder);
+    }
+    if (verb === "edit" && noun === "folder") {
+      const folder = this.folders.find((entry) => entry.id === a);
+      if (folder === undefined) {
+        return notFound;
+      }
+      folder.name = String((decode(b) as { name: unknown }).name);
+      return ok(folder);
+    }
+    if (verb === "delete" && noun === "folder") {
+      const before = this.folders.length;
+      this.folders = this.folders.filter((entry) => entry.id !== a);
+      for (const cipher of this.ciphers) {
+        if (cipher.folderId === a) {
+          cipher.folderId = null;
+        }
+      }
+      return before === this.folders.length ? notFound : ok("");
+    }
+    return { stdout: "", stderr: `unexpected bw ${args.join(" ")}`, code: 1 };
+  };
+}
 
-  find(id: string): FakeItem {
-    const item = this.items.find((entry) => entry.record.id === id);
-    if (!item) {
-      throw new ChaaviError(404, "not_found", "item not found");
-    }
-    return item;
-  }
+/** Decode the base64 JSON argument of `bw create` / `bw edit`. */
+function decode(arg: string | undefined): Cipher {
+  return JSON.parse(Buffer.from(arg ?? "", "base64").toString("utf8")) as Cipher;
 }
 
 export const LOGIN_ID = "11111111-1111-1111-1111-111111111111";
 export const NOTE_ID = "22222222-2222-2222-2222-222222222222";
 export const SSH_ID = "33333333-3333-3333-3333-333333333333";
 export const PASSKEY_ID = "44444444-4444-4444-4444-444444444444";
+export const CARD_ID = "55555555-5555-5555-5555-555555555555";
+export const IDENTITY_ID = "66666666-6666-6666-6666-666666666666";
+export const SECRET_NOTE_ID = "77777777-7777-7777-7777-777777777777";
 export const MISSING_ID = "00000000-0000-0000-0000-000000000000";
+export const DEV_FOLDER = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+export const FINANCE_FOLDER = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 
-export const SAMPLE_PASSKEY: PasskeyCredential = {
-  credentialId: "QUJDRA==",
-  rpId: "google.com",
-  privateKey: "MEECAQAwEwYHKoZIzj0CAQYIKoZIzj0DAQcEJzAlAgEBBCD/////////////////////8P/////w/////w==",
-  userHandle: "dXNlcg==",
-  signCount: 0,
-  resident: true,
-};
+/** RFC 6238 test key ("12345678901234567890") in base32. */
+export const TOTP_SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 
-/** Seed catalog: one login, one note, one ssh secret, one passkey login. */
-export function sampleItems(): FakeItem[] {
+/**
+ * Secret values in {@link sampleCiphers}, for asserting a response carries none of them. The
+ * card's 3-digit code is left out: it would also match timestamps.
+ */
+export const SAMPLE_SECRETS = [
+  "hunter2",
+  TOTP_SEED,
+  "wifi-note-body",
+  "4111111111111111",
+  "000-12-3456",
+  "X1234567",
+  "D-555",
+  "-----BEGIN OPENSSH PRIVATE KEY-----",
+  "hidden-recovery-code",
+  "tok_live_abc",
+  "passkey-private-key",
+];
+
+/** Folders for {@link sampleCiphers}. */
+export function sampleFolders(): Array<{ id: string; name: string }> {
+  return [
+    { id: DEV_FOLDER, name: "Dev" },
+    { id: FINANCE_FOLDER, name: "Finance" },
+  ];
+}
+
+/**
+ * Vault with one item of every type and every custom field kind: a login with TOTP and a
+ * hidden field, a passkey login, a Wi-Fi note, a card, an identity, an SSH key, and an agent
+ * secret note.
+ */
+export function sampleCiphers(): Cipher[] {
   return [
     {
-      record: {
-        id: LOGIN_ID,
-        name: "GitHub",
-        kind: "login",
+      id: LOGIN_ID,
+      type: 1,
+      name: "GitHub",
+      folderId: DEV_FOLDER,
+      favorite: true,
+      notes: null,
+      fields: [
+        { name: "Recovery", type: 1, value: "hidden-recovery-code", linkedId: null },
+        { name: "Org", type: 0, value: "dadi", linkedId: null },
+        { name: "Admin", type: 2, value: "true", linkedId: null },
+        { name: "User", type: 3, value: null, linkedId: 100 },
+      ],
+      login: {
         username: "octocat",
-        uris: ["https://github.com"],
-        hasPasskey: false,
+        password: "hunter2",
+        totp: TOTP_SEED,
+        uris: [{ uri: "https://github.com", match: null }, { uri: "", match: null }],
       },
-      password: "hunter2",
     },
     {
-      record: {
-        id: NOTE_ID,
-        name: "Wifi",
-        kind: "note",
-        username: null,
-        uris: [],
-        hasPasskey: false,
-      },
-      notes: "hunter2-note",
-    },
-    {
-      record: {
-        id: SSH_ID,
-        name: "Deploy key",
-        kind: "secret",
-        username: null,
-        uris: [],
-        hasPasskey: false,
-      },
-      secret: "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----",
-    },
-    {
-      record: {
-        id: PASSKEY_ID,
-        name: "Google",
-        kind: "login",
+      id: PASSKEY_ID,
+      type: 1,
+      name: "Google",
+      folderId: null,
+      favorite: false,
+      login: {
         username: "ada@example.com",
-        uris: ["https://accounts.google.com"],
-        hasPasskey: true,
+        password: null,
+        uris: [{ uri: "https://accounts.google.com", match: 0 }],
+        fido2Credentials: [
+          { rpId: "google.com", userName: "ada@example.com", keyValue: "passkey-private-key", creationDate: "2026-01-01T00:00:00Z" },
+        ],
       },
-      passkey: SAMPLE_PASSKEY,
+    },
+    { id: NOTE_ID, type: 2, name: "Wifi", folderId: null, notes: "wifi-note-body", secureNote: { type: 0 }, fields: [] },
+    {
+      id: CARD_ID,
+      type: 3,
+      name: "Sapphire",
+      folderId: FINANCE_FOLDER,
+      card: { cardholderName: "Ada Lovelace", brand: "Visa", number: "4111111111111111", expMonth: "8", expYear: "2029", code: "123" },
+      fields: [{ name: "Holder", type: 3, value: null, linkedId: 300 }],
+    },
+    {
+      id: IDENTITY_ID,
+      type: 4,
+      name: "Personal",
+      identity: {
+        firstName: "Ada",
+        lastName: "Lovelace",
+        address1: "1 Example St",
+        city: "East Lansing",
+        state: "MI",
+        postalCode: "48823",
+        country: "US",
+        email: "ada@example.com",
+        ssn: "000-12-3456",
+        passportNumber: "X1234567",
+        licenseNumber: "D-555",
+      },
+    },
+    {
+      id: SSH_ID,
+      type: 5,
+      name: "Deploy key",
+      sshKey: {
+        privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----",
+        publicKey: "ssh-ed25519 AAAAtest",
+        keyFingerprint: "SHA256:test",
+      },
+    },
+    {
+      id: SECRET_NOTE_ID,
+      type: 2,
+      name: "Stripe API key",
+      folderId: DEV_FOLDER,
+      notes: "Live key for billing.",
+      secureNote: { type: 0 },
+      fields: [
+        { name: "Account", type: 0, value: "acct_1", linkedId: null },
+        { name: "Secret", type: 1, value: "tok_live_abc", linkedId: null },
+      ],
     },
   ];
 }

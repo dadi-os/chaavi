@@ -1,330 +1,486 @@
 import assert from "node:assert/strict";
-import { after, test } from "node:test";
+import { after, beforeEach, test } from "node:test";
 import { buildApp } from "../src/app.js";
-import { createLogger } from "../src/logging.js";
 import { BwVault } from "../src/vault/bw.js";
 import {
-  FakeVault,
+  CARD_ID,
+  DEV_FOLDER,
+  FINANCE_FOLDER,
+  FakeBw,
+  IDENTITY_ID,
   LOGIN_ID,
   MISSING_ID,
   NOTE_ID,
   PASSKEY_ID,
-  SAMPLE_PASSKEY,
+  SAMPLE_SECRETS,
+  SECRET_NOTE_ID,
   SSH_ID,
+  TOTP_SEED,
   makeConfig,
-  sampleItems,
+  memoryLogger,
+  sampleCiphers,
+  sampleFolders,
 } from "./helpers.js";
 
-const fake = new FakeVault();
-fake.seed(sampleItems());
-
+const fake = new FakeBw();
+const log = memoryLogger();
 const readyConfig = makeConfig();
+const vault = new BwVault(readyConfig, log, fake.run);
+const app = await buildApp(readyConfig, { vault });
+
 const emptyConfig = makeConfig();
 emptyConfig.env.vaultUrl = "";
 emptyConfig.env.bw = { clientId: "", clientSecret: "", password: "", appDataDir: "" };
+const unconfigured = await buildApp(emptyConfig, { vault });
 
-const app = await buildApp(readyConfig, { vault: fake });
-const unconfigured = await buildApp(emptyConfig, { vault: fake });
+beforeEach(async () => {
+  fake.seed(sampleCiphers(), sampleFolders());
+  await vault.refreshCatalog();
+});
 
 after(async () => {
   await app.close();
   await unconfigured.close();
 });
 
+/** Assert a response body carries none of the sample secret values. */
+function assertNoSecrets(body: string): void {
+  for (const secret of SAMPLE_SECRETS) {
+    assert.equal(body.includes(secret), false, `response leaked ${secret}`);
+  }
+}
+
 test("GET /health reports ready vs unconfigured without calling the vault", async () => {
   const up = await app.inject({ method: "GET", url: "/health" });
-  assert.equal(up.statusCode, 200);
   assert.deepEqual(up.json(), { status: "ok", vault: "ready" });
-
   const down = await unconfigured.inject({ method: "GET", url: "/health" });
-  assert.equal(down.statusCode, 200);
   assert.deepEqual(down.json(), { status: "ok", vault: "unconfigured" });
 });
 
 test("GET /v1/items is 503 and names the first empty vault variable", async () => {
   const config = makeConfig();
-  config.env.vaultUrl = "https://chaavi.dadi";
   config.env.bw = { ...config.env.bw, clientSecret: "" };
-  const bare = await buildApp(config, { vault: new BwVault(config, createLogger()) });
+  const bare = await buildApp(config, {
+    vault: new BwVault(config, memoryLogger(), async () => {
+      throw new Error("bw must not run");
+    }),
+  });
   try {
     const res = await bare.inject({ method: "GET", url: "/v1/items" });
     assert.equal(res.statusCode, 503);
-    assert.equal(res.json().error.type, "vault_unconfigured");
-    assert.equal(res.json().error.message, "BW_CLIENTSECRET is not set");
+    assert.deepEqual(res.json().error, { type: "vault_unconfigured", message: "BW_CLIENTSECRET is not set" });
   } finally {
     await bare.close();
   }
 });
 
-test("GET /v1/items returns metadata only", async () => {
+test("GET /v1/items lists every type with its public fields and no secret value", async () => {
   const res = await app.inject({ method: "GET", url: "/v1/items" });
   assert.equal(res.statusCode, 200);
-  const body = res.json() as { items: Array<Record<string, unknown>> };
-  assert.equal(body.items.length, 4);
-  for (const item of body.items) {
-    assert.equal("password" in item, false);
-    assert.equal("notes" in item, false);
-    assert.equal("totp" in item, false);
-    assert.equal("value" in item, false);
-    assert.equal("privateKey" in item, false);
-    assert.equal("credentialId" in item, false);
-    assert.equal(typeof item.hasPasskey, "boolean");
-    assert.ok(typeof item.id === "string");
-    assert.ok(typeof item.name === "string");
-    assert.ok(item.kind === "login" || item.kind === "note" || item.kind === "secret");
-    assert.ok(item.username === null || typeof item.username === "string");
-    assert.ok(Array.isArray(item.uris));
-  }
-  const github = body.items.find((item) => item.id === LOGIN_ID);
-  assert.ok(github);
-  assert.equal(github.name, "GitHub");
-  assert.equal(github.kind, "login");
-  assert.equal(github.username, "octocat");
-  assert.equal(github.hasPasskey, false);
-  assert.deepEqual(github.uris, ["https://github.com"]);
-  const google = body.items.find((item) => item.id === PASSKEY_ID);
-  assert.ok(google);
-  assert.equal(google.hasPasskey, true);
-});
+  assertNoSecrets(res.body);
+  const items = res.json().items as Array<Record<string, any>>;
+  assert.deepEqual(items.map((item) => item.type).sort(), ["card", "identity", "login", "login", "note", "note", "sshKey"]);
 
-test("GET /v1/items filters q/uri/kind", async () => {
-  const byName = await app.inject({ method: "GET", url: "/v1/items?q=git" });
-  assert.equal(byName.statusCode, 200);
-  assert.equal(byName.json().items.length, 1);
-  assert.equal(byName.json().items[0].id, LOGIN_ID);
-
-  const byUser = await app.inject({ method: "GET", url: "/v1/items?q=octocat" });
-  assert.equal(byUser.json().items.length, 1);
-  assert.equal(byUser.json().items[0].id, LOGIN_ID);
-
-  const byUriQ = await app.inject({ method: "GET", url: "/v1/items?q=github.com" });
-  assert.equal(byUriQ.json().items.length, 1);
-
-  const byUri = await app.inject({ method: "GET", url: "/v1/items?uri=github.com" });
-  assert.equal(byUri.json().items.length, 1);
-  assert.equal(byUri.json().items[0].id, LOGIN_ID);
-
-  const notes = await app.inject({ method: "GET", url: "/v1/items?kind=note" });
-  assert.equal(notes.json().items.length, 1);
-  assert.equal(notes.json().items[0].id, NOTE_ID);
-
-  const secrets = await app.inject({ method: "GET", url: "/v1/items?kind=secret" });
-  assert.equal(secrets.json().items.length, 1);
-  assert.equal(secrets.json().items[0].id, SSH_ID);
-
-  const none = await app.inject({ method: "GET", url: "/v1/items?q=nope" });
-  assert.equal(none.json().items.length, 0);
-});
-
-test("GET /v1/items/:id missing is 404", async () => {
-  const res = await app.inject({ method: "GET", url: `/v1/items/${MISSING_ID}` });
-  assert.equal(res.statusCode, 404);
-  assert.equal(res.json().error.type, "not_found");
-});
-
-test("GET /v1/items/:id returns metadata only", async () => {
-  const res = await app.inject({ method: "GET", url: `/v1/items/${LOGIN_ID}` });
-  assert.equal(res.statusCode, 200);
-  const item = res.json() as Record<string, unknown>;
-  assert.equal("password" in item, false);
-  assert.equal("notes" in item, false);
-  assert.equal(item.id, LOGIN_ID);
-  assert.equal(item.username, "octocat");
-});
-
-test("POST /v1/items/:id/login returns username/password; not-a-login is invalid_request", async () => {
-  const login = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/login` });
-  assert.equal(login.statusCode, 200);
-  assert.deepEqual(login.json(), { username: "octocat", password: "hunter2" });
-
-  const note = await app.inject({ method: "POST", url: `/v1/items/${NOTE_ID}/login` });
-  assert.equal(note.statusCode, 422);
-  assert.equal(note.json().error.type, "invalid_request");
-  assert.equal(note.json().error.message, "item is not a login");
-
-  const missing = await app.inject({ method: "POST", url: `/v1/items/${MISSING_ID}/login` });
-  assert.equal(missing.statusCode, 404);
-  assert.equal(missing.json().error.type, "not_found");
-});
-
-test("POST /v1/logins creates a login without returning the password", async () => {
-  const res = await app.inject({
-    method: "POST",
-    url: "/v1/logins",
-    payload: {
-      name: "Greenhouse",
-      username: "ada@example.com",
-      uri: "https://job-boards.greenhouse.io",
-    },
+  const github = items.find((item) => item.id === LOGIN_ID)!;
+  assert.equal(github.folderId, DEV_FOLDER);
+  assert.equal(github.favorite, true);
+  assert.deepEqual(github.login, {
+    username: "octocat",
+    uris: [{ uri: "https://github.com", match: "default" }],
+    hasPassword: true,
+    hasTotp: true,
+    passkeys: [],
   });
-  assert.equal(res.statusCode, 200);
-  const item = res.json() as Record<string, unknown>;
-  assert.equal(typeof item.id, "string");
-  assert.equal(item.name, "Greenhouse");
-  assert.equal(item.kind, "login");
-  assert.equal(item.username, "ada@example.com");
-  assert.deepEqual(item.uris, ["https://job-boards.greenhouse.io"]);
-  assert.equal(item.hasPasskey, false);
-  assert.equal("password" in item, false);
-
-  const login = await app.inject({ method: "POST", url: `/v1/items/${item.id}/login` });
-  assert.equal(login.statusCode, 200);
-  assert.equal(login.json().username, "ada@example.com");
-  assert.equal(typeof login.json().password, "string");
-  assert.ok(String(login.json().password).length >= 12);
-});
-
-test("POST /v1/logins accepts an explicit password", async () => {
-  const res = await app.inject({
-    method: "POST",
-    url: "/v1/logins",
-    payload: {
-      name: "Manual",
-      username: "bob",
-      password: "correct-horse-battery",
-    },
-  });
-  assert.equal(res.statusCode, 200);
-  const item = res.json() as { id: string };
-  const login = await app.inject({ method: "POST", url: `/v1/items/${item.id}/login` });
-  assert.equal(login.statusCode, 200);
-  assert.deepEqual(login.json(), {
-    username: "bob",
-    password: "correct-horse-battery",
-  });
-});
-
-test("POST /v1/logins unknown field is 422", async () => {
-  const res = await app.inject({
-    method: "POST",
-    url: "/v1/logins",
-    payload: { name: "x", username: "ada", surprise: true },
-  });
-  assert.equal(res.statusCode, 422);
-  assert.equal(res.json().error.type, "invalid_request");
-});
-
-test("PATCH /v1/items/:id updates a login; non-login is invalid_request", async () => {
-  const patched = await app.inject({
-    method: "PATCH",
-    url: `/v1/items/${LOGIN_ID}`,
-    payload: { name: "GitHub Work", username: "octo", uri: "https://github.com/login" },
-  });
-  assert.equal(patched.statusCode, 200);
-  assert.equal(patched.json().name, "GitHub Work");
-  assert.equal(patched.json().username, "octo");
-  assert.deepEqual(patched.json().uris, ["https://github.com/login"]);
-  assert.equal("password" in patched.json(), false);
-
-  const withPassword = await app.inject({
-    method: "PATCH",
-    url: `/v1/items/${LOGIN_ID}`,
-    payload: { password: "new-secret" },
-  });
-  assert.equal(withPassword.statusCode, 200);
-  const login = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/login` });
-  assert.deepEqual(login.json(), { username: "octo", password: "new-secret" });
-
-  const note = await app.inject({
-    method: "PATCH",
-    url: `/v1/items/${NOTE_ID}`,
-    payload: { name: "Nope" },
-  });
-  assert.equal(note.statusCode, 422);
-  assert.equal(note.json().error.type, "invalid_request");
-
-  fake.seed(sampleItems());
-});
-
-test("PATCH /v1/items/:id empty body is 422", async () => {
-  const res = await app.inject({
-    method: "PATCH",
-    url: `/v1/items/${LOGIN_ID}`,
-    payload: {},
-  });
-  assert.equal(res.statusCode, 422);
-  assert.equal(res.json().error.type, "invalid_request");
-});
-
-test("DELETE /v1/items/:id removes a login; non-login is invalid_request", async () => {
-  const created = await app.inject({
-    method: "POST",
-    url: "/v1/logins",
-    payload: { name: "Temp", username: "tmp", password: "temporary-pass-12" },
-  });
-  assert.equal(created.statusCode, 200);
-  const id = created.json().id as string;
-
-  const deleted = await app.inject({ method: "DELETE", url: `/v1/items/${id}` });
-  assert.equal(deleted.statusCode, 204);
-
-  const missing = await app.inject({ method: "GET", url: `/v1/items/${id}` });
-  assert.equal(missing.statusCode, 404);
-
-  const note = await app.inject({ method: "DELETE", url: `/v1/items/${NOTE_ID}` });
-  assert.equal(note.statusCode, 422);
-  assert.equal(note.json().error.type, "invalid_request");
-});
-
-test("POST /v1/items/:id/passkey returns CDP fields; missing passkey is invalid_request", async () => {
-  const passkey = await app.inject({ method: "POST", url: `/v1/items/${PASSKEY_ID}/passkey` });
-  assert.equal(passkey.statusCode, 200);
-  assert.deepEqual(passkey.json(), SAMPLE_PASSKEY);
-
-  const login = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/passkey` });
-  assert.equal(login.statusCode, 422);
-  assert.equal(login.json().error.type, "invalid_request");
-  assert.equal(login.json().error.message, "item has no passkey");
-
-  const note = await app.inject({ method: "POST", url: `/v1/items/${NOTE_ID}/passkey` });
-  assert.equal(note.statusCode, 422);
-  assert.equal(note.json().error.type, "invalid_request");
-
-  const missing = await app.inject({ method: "POST", url: `/v1/items/${MISSING_ID}/passkey` });
-  assert.equal(missing.statusCode, 404);
-  assert.equal(missing.json().error.type, "not_found");
-});
-
-test("POST /v1/items/:id/secret returns value", async () => {
-  const login = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/secret` });
-  assert.equal(login.statusCode, 200);
-  assert.deepEqual(login.json(), { value: "hunter2" });
-
-  const note = await app.inject({ method: "POST", url: `/v1/items/${NOTE_ID}/secret` });
-  assert.equal(note.statusCode, 200);
-  assert.deepEqual(note.json(), { value: "hunter2-note" });
-
-  const ssh = await app.inject({ method: "POST", url: `/v1/items/${SSH_ID}/secret` });
-  assert.equal(ssh.statusCode, 200);
-  assert.equal(typeof ssh.json().value, "string");
-  assert.ok(String(ssh.json().value).includes("BEGIN OPENSSH"));
-});
-
-test("POST login with empty password is invalid_request", async () => {
-  fake.seed([
-    {
-      record: {
-        id: LOGIN_ID,
-        name: "Empty",
-        kind: "login",
-        username: "x",
-        uris: [],
-        hasPasskey: false,
-      },
-      password: "",
-    },
+  assert.deepEqual(github.fields, [
+    { name: "Recovery", type: "hidden", hasValue: true },
+    { name: "Org", type: "text", value: "dadi" },
+    { name: "Admin", type: "boolean", value: true },
+    { name: "User", type: "linked", linkedTo: "username" },
   ]);
-  try {
-    const res = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/login` });
-    assert.equal(res.statusCode, 422);
+
+  const google = items.find((item) => item.id === PASSKEY_ID)!;
+  assert.deepEqual(google.login.passkeys, [
+    { rpId: "google.com", userName: "ada@example.com", creationDate: "2026-01-01T00:00:00Z" },
+  ]);
+  assert.equal(google.login.uris[0].match, "domain");
+  assert.equal(google.login.hasPassword, false);
+
+  const card = items.find((item) => item.id === CARD_ID)!;
+  assert.deepEqual(card.card, {
+    cardholderName: "Ada Lovelace",
+    brand: "Visa",
+    expMonth: "8",
+    expYear: "2029",
+    hasNumber: true,
+    hasCode: true,
+  });
+  assert.deepEqual(card.fields, [{ name: "Holder", type: "linked", linkedTo: "cardholderName" }]);
+
+  const identity = items.find((item) => item.id === IDENTITY_ID)!;
+  assert.equal(identity.identity.city, "East Lansing");
+  assert.equal(identity.identity.hasSsn, true);
+  assert.equal(identity.identity.hasPassportNumber, true);
+  assert.equal(identity.identity.hasLicenseNumber, true);
+
+  const ssh = items.find((item) => item.id === SSH_ID)!;
+  assert.deepEqual(ssh.sshKey, { publicKey: "ssh-ed25519 AAAAtest", keyFingerprint: "SHA256:test", hasPrivateKey: true });
+
+  const note = items.find((item) => item.id === NOTE_ID)!;
+  assert.equal(note.hasNotes, true);
+  assert.equal("notes" in note, false);
+});
+
+test("GET /v1/items filters by q, uri and type", async () => {
+  const ids = async (query: string) =>
+    ((await app.inject({ method: "GET", url: `/v1/items${query}` })).json().items as Array<{ id: string }>).map((item) => item.id);
+  assert.deepEqual(await ids("?q=octo"), [LOGIN_ID]);
+  assert.deepEqual(await ids("?q=visa"), [CARD_ID]);
+  assert.deepEqual(await ids("?q=dadi"), [LOGIN_ID]);
+  assert.deepEqual(await ids("?q=lovelace"), [CARD_ID, IDENTITY_ID]);
+  assert.deepEqual(await ids("?uri=github.com"), [LOGIN_ID]);
+  assert.deepEqual(await ids("?type=sshKey"), [SSH_ID]);
+  assert.deepEqual(await ids("?type=note"), [NOTE_ID, SECRET_NOTE_ID]);
+  assert.deepEqual(await ids("?q=nope"), []);
+  const bad = await app.inject({ method: "GET", url: "/v1/items?kind=login" });
+  assert.equal(bad.statusCode, 422);
+  assert.equal(bad.json().error.type, "invalid_request");
+});
+
+test("GET /v1/items/:id returns one item without secrets; unknown is 404", async () => {
+  const res = await app.inject({ method: "GET", url: `/v1/items/${IDENTITY_ID}` });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().identity.firstName, "Ada");
+  assertNoSecrets(res.body);
+  const missing = await app.inject({ method: "GET", url: `/v1/items/${MISSING_ID}` });
+  assert.equal(missing.statusCode, 404);
+  assert.equal(missing.json().error.type, "not_found");
+  const notUuid = await app.inject({ method: "GET", url: "/v1/items/nope" });
+  assert.equal(notUuid.statusCode, 422);
+});
+
+test("POST /v1/items creates a login with a generated password it never returns", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/v1/items",
+    payload: {
+      type: "login",
+      name: "Greenhouse",
+      folderId: DEV_FOLDER,
+      login: { username: "ada@example.com", uris: [{ uri: "https://job-boards.greenhouse.io", match: "host" }], length: 24 },
+      fields: [{ name: "Pin", type: "hidden", value: "4242" }],
+    },
+  });
+  assert.equal(res.statusCode, 201);
+  const item = res.json();
+  assert.equal(item.type, "login");
+  assert.equal(item.folderId, DEV_FOLDER);
+  assert.deepEqual(item.login.uris, [{ uri: "https://job-boards.greenhouse.io", match: "host" }]);
+  assert.equal(item.login.hasPassword, true);
+  assert.deepEqual(item.fields, [{ name: "Pin", type: "hidden", hasValue: true }]);
+  assert.equal(res.body.includes("4242"), false);
+  const stored = fake.stored(item.id);
+  assert.equal(String(stored.login?.password).length, 24);
+
+  const listed = await app.inject({ method: "GET", url: `/v1/items/${item.id}` });
+  assert.equal(listed.statusCode, 200);
+});
+
+test("POST /v1/items creates a note, card, identity and generated SSH key", async () => {
+  const note = await app.inject({ method: "POST", url: "/v1/items", payload: { type: "note", name: "Lockbox", notes: "code is in the drawer" } });
+  assert.equal(note.statusCode, 201);
+  assert.equal(note.json().hasNotes, true);
+  assert.equal(note.body.includes("drawer"), false);
+  assert.deepEqual(fake.stored(note.json().id).secureNote, { type: 0 });
+
+  const card = await app.inject({
+    method: "POST",
+    url: "/v1/items",
+    payload: { type: "card", name: "Amex", card: { cardholderName: "Ada", brand: "Amex", number: "3782 822463 10005", expMonth: "02", expYear: "2028", code: "4321" } },
+  });
+  assert.equal(card.statusCode, 201);
+  assert.equal(card.json().card.expMonth, "2");
+  assert.equal(card.body.includes("378282246310005"), false);
+  assert.equal(fake.stored(card.json().id).card?.number, "378282246310005");
+
+  const identity = await app.inject({
+    method: "POST",
+    url: "/v1/items",
+    payload: { type: "identity", name: "Work", identity: { firstName: "Ada", company: "Analytical", ssn: "111-22-3333" } },
+  });
+  assert.equal(identity.statusCode, 201);
+  assert.equal(identity.json().identity.company, "Analytical");
+  assert.equal(identity.json().identity.hasSsn, true);
+  assert.equal(identity.body.includes("111-22-3333"), false);
+
+  const ssh = await app.inject({ method: "POST", url: "/v1/items", payload: { type: "sshKey", name: "New key" } });
+  assert.equal(ssh.statusCode, 201);
+  assert.match(ssh.json().sshKey.publicKey, /^ssh-ed25519 /);
+  assert.match(ssh.json().sshKey.keyFingerprint, /^SHA256:/);
+  assert.equal(ssh.body.includes("PRIVATE KEY"), false);
+  assert.match(String(fake.stored(ssh.json().id).sshKey?.privateKey), /^-----BEGIN OPENSSH PRIVATE KEY-----/);
+});
+
+test("POST /v1/items rejects invalid bodies with invalid_request", async () => {
+  const cases: unknown[] = [
+    { type: "login", name: "x", surprise: true },
+    { type: "bank", name: "x" },
+    { type: "login", name: "x", login: { password: "given-password", length: 20 } },
+    { type: "card", name: "x", card: { number: "12" } },
+    { type: "card", name: "x", card: { expMonth: "13" } },
+    { type: "note", name: "x", fields: [{ name: "a", type: "text", value: "1" }, { name: "a", type: "text", value: "2" }] },
+    { type: "note", name: "x", fields: [{ name: "a", type: "linked", linkedTo: "password" }] },
+    { type: "card", name: "x", fields: [{ name: "a", type: "linked", linkedTo: "password" }] },
+    { type: "note", name: "x", fields: [{ name: "a", type: "hidden" }] },
+    { type: "note", name: "x", folderId: MISSING_ID },
+    { type: "login", name: "x", login: { totp: "not base32 !!" } },
+    { type: "sshKey", name: "x", sshKey: { privateKey: "only this" } },
+  ];
+  for (const payload of cases) {
+    const res = await app.inject({ method: "POST", url: "/v1/items", payload: payload as Record<string, unknown> });
+    assert.equal(res.statusCode, 422, JSON.stringify(payload));
     assert.equal(res.json().error.type, "invalid_request");
-  } finally {
-    fake.seed(sampleItems());
   }
 });
 
-test("unknown query field is 422", async () => {
-  const res = await app.inject({ method: "GET", url: "/v1/items?foo=1" });
-  assert.equal(res.statusCode, 422);
-  assert.equal(res.json().error.type, "invalid_request");
+test("PATCH /v1/items/:id edits fields, keeps an untouched hidden value, moves and stars", async () => {
+  const res = await app.inject({
+    method: "PATCH",
+    url: `/v1/items/${LOGIN_ID}`,
+    payload: {
+      name: "GitHub Work",
+      login: { username: "octo", uris: [{ uri: "https://github.com/login" }] },
+      fields: [
+        { name: "Recovery", type: "hidden" },
+        { name: "Org", type: "text", value: "fliks" },
+      ],
+    },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().name, "GitHub Work");
+  assert.equal(res.json().login.username, "octo");
+  assert.deepEqual(res.json().fields, [
+    { name: "Recovery", type: "hidden", hasValue: true },
+    { name: "Org", type: "text", value: "fliks" },
+  ]);
+  assertNoSecrets(res.body);
+  const recovery = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/reveal`, payload: { field: "custom", name: "Recovery" } });
+  assert.deepEqual(recovery.json(), { value: "hidden-recovery-code" });
+  assert.equal(fake.stored(LOGIN_ID).login?.password, "hunter2");
+
+  const moved = await app.inject({ method: "PATCH", url: `/v1/items/${CARD_ID}`, payload: { folderId: DEV_FOLDER, favorite: true } });
+  assert.equal(moved.statusCode, 200);
+  assert.equal(moved.json().folderId, DEV_FOLDER);
+  assert.equal(moved.json().favorite, true);
+  const listed = await app.inject({ method: "GET", url: `/v1/items/${CARD_ID}` });
+  assert.equal(listed.json().folderId, DEV_FOLDER);
+
+  const out = await app.inject({ method: "PATCH", url: `/v1/items/${CARD_ID}`, payload: { folderId: null } });
+  assert.equal(out.json().folderId, null);
+
+  const cleared = await app.inject({ method: "PATCH", url: `/v1/items/${CARD_ID}`, payload: { card: { code: "" } } });
+  assert.equal(cleared.json().card.hasCode, false);
+});
+
+test("PATCH /v1/items/:id refuses a mismatched type, an empty body, and unknown ids", async () => {
+  const mismatch = await app.inject({ method: "PATCH", url: `/v1/items/${LOGIN_ID}`, payload: { card: { brand: "Visa" } } });
+  assert.equal(mismatch.statusCode, 422);
+  assert.equal(mismatch.json().error.message, "card fields do not apply to a login item");
+  const empty = await app.inject({ method: "PATCH", url: `/v1/items/${LOGIN_ID}`, payload: {} });
+  assert.equal(empty.statusCode, 422);
+  const newHidden = await app.inject({
+    method: "PATCH",
+    url: `/v1/items/${LOGIN_ID}`,
+    payload: { fields: [{ name: "Brand new", type: "hidden" }] },
+  });
+  assert.equal(newHidden.statusCode, 422);
+  const folder = await app.inject({ method: "PATCH", url: `/v1/items/${LOGIN_ID}`, payload: { folderId: MISSING_ID } });
+  assert.equal(folder.statusCode, 422);
+  const missing = await app.inject({ method: "PATCH", url: `/v1/items/${MISSING_ID}`, payload: { name: "x" } });
+  assert.equal(missing.statusCode, 404);
+});
+
+test("DELETE /v1/items/:id deletes any type", async () => {
+  for (const id of [CARD_ID, NOTE_ID, SSH_ID]) {
+    const res = await app.inject({ method: "DELETE", url: `/v1/items/${id}` });
+    assert.equal(res.statusCode, 204);
+    const gone = await app.inject({ method: "GET", url: `/v1/items/${id}` });
+    assert.equal(gone.statusCode, 404);
+  }
+  const missing = await app.inject({ method: "DELETE", url: `/v1/items/${MISSING_ID}` });
+  assert.equal(missing.statusCode, 404);
+});
+
+test("POST /v1/items/:id/reveal returns one secret and refuses what the item lacks", async () => {
+  const reveal = (id: string, payload: Record<string, unknown>) =>
+    app.inject({ method: "POST", url: `/v1/items/${id}/reveal`, payload });
+  assert.deepEqual((await reveal(LOGIN_ID, { field: "password" })).json(), { value: "hunter2" });
+  assert.deepEqual((await reveal(LOGIN_ID, { field: "totp" })).json(), { value: TOTP_SEED });
+  assert.deepEqual((await reveal(NOTE_ID, { field: "notes" })).json(), { value: "wifi-note-body" });
+  assert.deepEqual((await reveal(CARD_ID, { field: "number" })).json(), { value: "4111111111111111" });
+  assert.deepEqual((await reveal(CARD_ID, { field: "code" })).json(), { value: "123" });
+  assert.deepEqual((await reveal(IDENTITY_ID, { field: "ssn" })).json(), { value: "000-12-3456" });
+  assert.deepEqual((await reveal(IDENTITY_ID, { field: "licenseNumber" })).json(), { value: "D-555" });
+  assert.match((await reveal(SSH_ID, { field: "privateKey" })).json().value, /OPENSSH PRIVATE KEY/);
+  assert.deepEqual((await reveal(SECRET_NOTE_ID, { field: "custom", name: "Secret" })).json(), { value: "tok_live_abc" });
+
+  const refusals: Array<[string, Record<string, unknown>, string]> = [
+    [CARD_ID, { field: "password" }, "a card item has no password"],
+    [PASSKEY_ID, { field: "password" }, "item has no password"],
+    [LOGIN_ID, { field: "custom", name: "Org" }, 'field "Org" is not hidden'],
+    [LOGIN_ID, { field: "custom", name: "Nope" }, 'item has no field named "Nope"'],
+    [CARD_ID, { field: "notes" }, "item has no notes"],
+  ];
+  for (const [id, payload, message] of refusals) {
+    const res = await reveal(id, payload);
+    assert.equal(res.statusCode, 422);
+    assert.deepEqual(res.json().error, { type: "invalid_request", message });
+  }
+  assert.equal((await reveal(LOGIN_ID, { field: "everything" })).statusCode, 422);
+  assert.equal((await reveal(MISSING_ID, { field: "password" })).statusCode, 404);
+});
+
+test("POST /v1/items/:id/totp returns the current code", async () => {
+  const res = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/totp` });
+  assert.equal(res.statusCode, 200);
+  assert.match(res.json().code, /^\d{6}$/);
+  assert.equal(res.json().period, 30);
+  assert.ok(res.json().remaining >= 1 && res.json().remaining <= 30);
+  const none = await app.inject({ method: "POST", url: `/v1/items/${PASSKEY_ID}/totp` });
+  assert.equal(none.statusCode, 422);
+  assert.equal(none.json().error.message, "item has no authenticator key");
+});
+
+test("POST /v1/items/:id/login, /card and /passkey decrypt for fills", async () => {
+  const login = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/login` });
+  assert.deepEqual(login.json(), { username: "octocat", password: "hunter2" });
+  const card = await app.inject({ method: "POST", url: `/v1/items/${CARD_ID}/card` });
+  assert.deepEqual(card.json(), {
+    cardholderName: "Ada Lovelace",
+    brand: "Visa",
+    number: "4111111111111111",
+    expMonth: "8",
+    expYear: "2029",
+    code: "123",
+  });
+  const notCard = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/card` });
+  assert.equal(notCard.statusCode, 422);
+  assert.equal(notCard.json().error.message, "item is not a card");
+  const noPasskey = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/passkey` });
+  assert.equal(noPasskey.json().error.message, "item has no passkey");
+  const notLogin = await app.inject({ method: "POST", url: `/v1/items/${NOTE_ID}/login` });
+  assert.equal(notLogin.json().error.message, "item is not a login");
+});
+
+test("folders: list without No Folder, create, rename, and delete moving items out", async () => {
+  const listed = await app.inject({ method: "GET", url: "/v1/folders" });
+  assert.deepEqual(listed.json(), { folders: sampleFolders() });
+
+  const created = await app.inject({ method: "POST", url: "/v1/folders", payload: { name: "  School " } });
+  assert.equal(created.statusCode, 201);
+  assert.equal(created.json().name, "School");
+
+  const renamed = await app.inject({ method: "PATCH", url: `/v1/folders/${FINANCE_FOLDER}`, payload: { name: "Money" } });
+  assert.deepEqual(renamed.json(), { id: FINANCE_FOLDER, name: "Money" });
+
+  const deleted = await app.inject({ method: "DELETE", url: `/v1/folders/${DEV_FOLDER}` });
+  assert.equal(deleted.statusCode, 204);
+  const after = await app.inject({ method: "GET", url: "/v1/folders" });
+  assert.deepEqual(
+    (after.json().folders as Array<{ name: string }>).map((folder) => folder.name),
+    ["Money", "School"],
+  );
+  const github = await app.inject({ method: "GET", url: `/v1/items/${LOGIN_ID}` });
+  assert.equal(github.json().folderId, null);
+
+  const missing = await app.inject({ method: "PATCH", url: `/v1/folders/${MISSING_ID}`, payload: { name: "x" } });
+  assert.equal(missing.statusCode, 404);
+  assert.equal(missing.json().error.message, "folder not found");
+  const blank = await app.inject({ method: "POST", url: "/v1/folders", payload: { name: "   " } });
+  assert.equal(blank.statusCode, 422);
+});
+
+test("secrets resolve the hidden Secret field of the Secure Note named for them", async () => {
+  const hit = await app.inject({ method: "POST", url: `/v1/secrets/${encodeURIComponent("stripe api key")}/reveal` });
+  assert.deepEqual(hit.json(), { value: "tok_live_abc" });
+
+  const missing = await app.inject({ method: "POST", url: "/v1/secrets/Nope/reveal" });
+  assert.equal(missing.statusCode, 404);
+  assert.equal(missing.json().error.message, 'no secure note is named "Nope"');
+
+  const noField = await app.inject({ method: "POST", url: "/v1/secrets/Wifi/reveal" });
+  assert.equal(noField.statusCode, 422);
+  assert.equal(noField.json().error.message, 'item has no field named "Secret"');
+
+  const loginNamed = await app.inject({ method: "POST", url: "/v1/secrets/GitHub/reveal" });
+  assert.equal(loginNamed.statusCode, 404);
+});
+
+test("PUT /v1/secrets/:name creates the note, then updates its Secret and keeps other fields", async () => {
+  const created = await app.inject({
+    method: "PUT",
+    url: `/v1/secrets/${encodeURIComponent("Gmail app password")}`,
+    payload: { value: "abcd efgh ijkl mnop", notes: "for the mail worker" },
+  });
+  assert.equal(created.statusCode, 201);
+  assert.equal(created.json().created, true);
+  assert.equal(created.json().item.type, "note");
+  assert.deepEqual(created.json().item.fields, [{ name: "Secret", type: "hidden", hasValue: true }]);
+  assert.equal(created.body.includes("abcd efgh"), false);
+  const revealed = await app.inject({ method: "POST", url: `/v1/secrets/${encodeURIComponent("Gmail app password")}/reveal` });
+  assert.deepEqual(revealed.json(), { value: "abcd efgh ijkl mnop" });
+
+  const updated = await app.inject({ method: "PUT", url: `/v1/secrets/${encodeURIComponent("Stripe API key")}`, payload: { value: "tok_live_new" } });
+  assert.equal(updated.statusCode, 200);
+  assert.equal(updated.json().created, false);
+  assert.equal(updated.json().item.id, SECRET_NOTE_ID);
+  assert.deepEqual(updated.json().item.fields, [
+    { name: "Account", type: "text", value: "acct_1" },
+    { name: "Secret", type: "hidden", hasValue: true },
+  ]);
+  assert.equal(fake.stored(SECRET_NOTE_ID).notes, "Live key for billing.");
+  const again = await app.inject({ method: "POST", url: `/v1/secrets/${encodeURIComponent("Stripe API key")}/reveal` });
+  assert.deepEqual(again.json(), { value: "tok_live_new" });
+});
+
+test("two Secure Notes with one name are a conflict for save and reveal", async () => {
+  await app.inject({ method: "POST", url: "/v1/items", payload: { type: "note", name: "STRIPE API KEY" } });
+  const save = await app.inject({ method: "PUT", url: `/v1/secrets/${encodeURIComponent("Stripe API key")}`, payload: { value: "x" } });
+  assert.equal(save.statusCode, 409);
+  assert.equal(save.json().error.type, "conflict");
+  const reveal = await app.inject({ method: "POST", url: `/v1/secrets/${encodeURIComponent("Stripe API key")}/reveal` });
+  assert.equal(reveal.statusCode, 409);
+});
+
+test("POST /v1/generate returns a fresh password of the asked length", async () => {
+  const res = await app.inject({ method: "POST", url: "/v1/generate", payload: { length: 32, special: false } });
+  assert.equal(res.statusCode, 200);
+  assert.match(res.json().password, /^[A-Za-z0-9]{32}$/);
+  const bad = await app.inject({ method: "POST", url: "/v1/generate", payload: { length: 5 } });
+  assert.equal(bad.statusCode, 422);
+});
+
+test("ciphers of an unsupported type stay out of the catalog with one warn line", async () => {
+  fake.seed([...sampleCiphers(), { id: "88888888-8888-8888-8888-888888888888", type: 6, name: "Bank" }], sampleFolders());
+  log.lines.length = 0;
+  await vault.refreshCatalog();
+  await vault.refreshCatalog();
+  const res = await app.inject({ method: "GET", url: "/v1/items" });
+  assert.equal((res.json().items as unknown[]).length, sampleCiphers().length);
+  const warns = log.lines.filter((line) => line.attrs?.code === "unsupported_item_type");
+  assert.equal(warns.length, 1);
+  assert.equal(warns[0]?.attrs?.count, 1);
+});
+
+test("a bw failure reports the CLI's own first stderr line as vault_unreachable", async () => {
+  const failing = new BwVault(readyConfig, memoryLogger(), async (argv) => {
+    if (argv.includes("create")) {
+      return { stdout: "", stderr: "SSH key public key is required.\n    at stack", code: 1 };
+    }
+    return fake.run(argv);
+  });
+  await failing.refreshCatalog();
+  await assert.rejects(failing.createItem({ type: "note", name: "x" }), {
+    type: "vault_unreachable",
+    message: "vault command failed: SSH key public key is required.",
+  });
 });

@@ -4,14 +4,19 @@
  * talks to Vaultwarden.
  */
 
+import { join } from "node:path";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logging.js";
-import { BwVault } from "./vault/index.js";
+import { BwVault, spawnBwRunner } from "./vault/index.js";
 
 const log = createLogger();
 const config = loadConfig();
-const vault = new BwVault(config, log);
+const vault = new BwVault(
+  config,
+  log,
+  spawnBwRunner(join(config.serviceRoot, "node_modules", ".bin", "bw"), config.vault.timeout_ms),
+);
 await vault.start();
 const app = await buildApp(config, { vault });
 

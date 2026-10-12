@@ -1,8 +1,8 @@
 # Chaavi
 
-Credential data API for dadi. Chaavi owns the catalog and `/v1` semantics for Thaali and Hath. Vaultwarden is the encrypted store (zero-knowledge durability for the Bitwarden extension). `@bitwarden/cli` is the crypto/transport driver only — unlock, background sync, create/edit/delete, and decrypt-on-reveal.
+Credential data API for dadi. Chaavi owns the catalog and `/v1` semantics for Thaali and Hath. Vaultwarden is the encrypted store (zero-knowledge durability for the Bitwarden extension). `@bitwarden/cli` is the crypto/transport driver only — unlock, background sync, create/edit/delete, and decrypt-on-reveal. Chaavi serves every Bitwarden item type Thaali and Hath use (login with websites, TOTP and passkeys; Secure Note; card; identity; SSH key), custom fields of every kind, and folders.
 
-Human fill in Arc uses the official Bitwarden extension at `https://chaavi.dadi`. Thaali's Chaavi page is the login password manager over this adapter. Caddy terminates TLS with a mesh-local CA (Thaali installs it on join): `/v1*` and `/health` go to Chaavi; everything else goes to Vaultwarden. This repo does not fork Vaultwarden; Nas runs unmodified upstream `vaultwarden/server:1.37.2-alpine`.
+Human fill in Arc uses the official Bitwarden extension at `https://chaavi.dadi`. Thaali's Chaavi page is the full password manager over this adapter. Caddy terminates TLS with a mesh-local CA (Thaali installs it on join): `/v1*` and `/health` go to Chaavi; everything else goes to Vaultwarden. This repo does not fork Vaultwarden; Nas runs unmodified upstream `vaultwarden/server:1.37.2-alpine`.
 
 Unauthenticated; private mesh only.
 
@@ -20,7 +20,8 @@ Dwar operational keys stay in Nas `modules/dwar`. Agent unlock keys are Chaavi m
 chaavi/
   src/
     app.ts, config.ts, logging.ts, errors.ts, constants.ts
-    vault/        Vault interface + bw CLI implementation + in-memory catalog
+    vault/        Vault interface; bw.ts (CLI driver + in-memory catalog); cipher.ts (cipher <-> item
+                  mapping, writes, reveal); totp.ts, ssh.ts (Ed25519 generation), password.ts
     routers/      HTTP routes + schemas
     types/        domain types
   test/
@@ -64,16 +65,17 @@ Concurrency cancels superseded runs on the same ref.
 
 ## Logging / error codes
 
-Logs follow the nas JSON contract (`service=chaavi`, request summary with `request_id` / `duration_ms`, errors with `code`). Default Fastify access logging is off. Process-level boot/shutdown lines use the same JSON shape via `createLogger()`. Request lines include method and path (item id on reveal routes) — never password, totp, notes body, passkey keys, or secret values. Background sync failures log `vault_unreachable` and retry on the next tick.
+Logs follow the nas JSON contract (`service=chaavi`, request summary with `request_id` / `duration_ms`, errors with `code`). Default Fastify access logging is off. Process-level boot/shutdown lines use the same JSON shape via `createLogger()`. Request lines include method and path (item id on reveal routes, the secret's name on `/v1/secrets/:name`) — never a password, TOTP key or code, notes, card number or code, identity number, private key, hidden field value, or passkey key. Ciphers of a Bitwarden type Chaavi does not serve (bank account, driver's license) are left out of the catalog with one `unsupported_item_type` warn line whenever their count changes. Background sync failures log `vault_unreachable` and retry on the next tick.
 
-HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`. Shared codes include `invalid_request`, `not_found`, `internal_error`. Domain codes include `vault_unconfigured`, `vault_unreachable`. See nas README for the shared catalog.
+HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`. Shared codes include `invalid_request`, `not_found`, `conflict`, `internal_error`. Domain codes include `vault_unconfigured`, `vault_unreachable`. See nas README for the shared catalog.
 
 | Code | Status | When |
 | --- | --- | --- |
-| `invalid_request` | 422 | Validation / item is not a login / no secret or passkey to reveal / create body invalid |
-| `not_found` | 404 | Unknown item id |
+| `invalid_request` | 422 | Validation; a type object or reveal field the item's type lacks; an empty secret; an unknown folder id in a write |
+| `not_found` | 404 | Unknown item or folder id; no Secure Note has the secret's name |
+| `conflict` | 409 | Two Secure Notes share a secret's name, or a note has two `Secret` fields |
 | `vault_unconfigured` | 503 | A vault env var is empty; `message` names it |
-| `vault_unreachable` | 502 | `bw` / Vaultwarden failure |
+| `vault_unreachable` | 502 | `bw` / Vaultwarden failure; `message` carries the CLI's first stderr line |
 | `internal_error` | 500 | Unexpected failure |
 
 ## Vault setup
@@ -87,16 +89,27 @@ Human fill uses `https://chaavi.dadi` (Bitwarden extension / web vault). Thaali'
 
 ## Routes
 
+Items are type-aware: every item has `id`, `name`, `type` (`login` \| `note` \| `card` \| `identity` \| `sshKey`), `folderId`, `favorite`, `hasNotes`, `fields`, `revisionDate`, and one object for its type (`login`, `card`, `identity`, `sshKey`) holding its non-secret fields and `has…` flags for its secrets. Custom fields are `text` (value), `hidden` (`hasValue` only), `boolean` (value) or `linked` (`linkedTo`, a property of that item type). List and detail never carry a secret value; the reveal routes decrypt one on demand.
+
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/health` | `{ "status": "ok", "vault": "ready" \| "unconfigured" }`. Does not ping Vaultwarden. |
-| `GET` | `/v1/items` | Catalog metadata from Chaavi's in-memory catalog (`hasPasskey` on logins). Query: `q`, `uri`, `kind` (`login` \| `note` \| `secret`). |
-| `GET` | `/v1/items/:id` | One item's metadata from the catalog. |
-| `POST` | `/v1/logins` | Create a login. Body: `name`, `username`, optional `uri` / `password` / `length` (12–64, default 20) / `special` (default true). When `password` is omitted the vault generates one (`length`/`special`); when supplied, `length`/`special` are rejected. Returns catalog metadata, never the password. Upserts the catalog immediately. |
-| `PATCH` | `/v1/items/:id` | Update a login. Body: at least one of `name`, `username`, `uri`, `password`. Empty `uri` clears websites. Non-login → `422`. Returns catalog metadata. |
-| `DELETE` | `/v1/items/:id` | Delete a login (`204`). Non-login → `422`. |
-| `POST` | `/v1/items/:id/login` | `{ "username", "password" }` for a login item (decrypt on demand). |
+| `GET` | `/v1/items` | Catalog from memory. Query: `q` (name, username, websites, card brand/holder, identity name/email, text fields), `uri`, `type`. |
+| `GET` | `/v1/items/:id` | One item from the catalog. |
+| `POST` | `/v1/items` | Create any type (`201`). Body: `type`, `name`, optional `folderId`, `favorite`, `notes`, `fields`, and the type object. A login without `password` gets a generated one (`length` 12–64, default 20; `special`, default true); an SSH key without key material gets a new Ed25519 key (else give `privateKey`, `publicKey`, `keyFingerprint` together). |
+| `PATCH` | `/v1/items/:id` | Change only the given keys; `""` clears an optional value; `fields` replaces the list, and a hidden field without `value` keeps its stored value; the type object must match. `{ "folderId" }` moves the item (`null` = no folder); `{ "favorite" }` stars it. |
+| `DELETE` | `/v1/items/:id` | Delete any type (`204`; Vaultwarden keeps it in trash). |
+| `POST` | `/v1/items/:id/reveal` | `{ "field": "password" \| "totp" \| "number" \| "code" \| "ssn" \| "passportNumber" \| "licenseNumber" \| "privateKey" \| "notes" }` or `{ "field": "custom", "name" }` for a hidden field → `{ "value" }`. |
+| `POST` | `/v1/items/:id/totp` | `{ "code", "period", "remaining" }` from the login's key (base32 or `otpauth://totp`). |
+| `POST` | `/v1/items/:id/login` | `{ "username", "password" }` for a login fill. |
+| `POST` | `/v1/items/:id/card` | `{ "cardholderName", "brand", "number", "expMonth", "expYear", "code" }` for a card fill. |
 | `POST` | `/v1/items/:id/passkey` | CDP-ready passkey (`credentialId`, `rpId`, `privateKey`, `userHandle`, `signCount`, `resident`). |
-| `POST` | `/v1/items/:id/secret` | `{ "value" }` — login password, note body, or a single secret field. |
+| `GET` | `/v1/folders` | `{ "folders": [{ "id", "name" }] }`. |
+| `POST` | `/v1/folders` | `{ "name" }` → folder (`201`). |
+| `PATCH` | `/v1/folders/:id` | `{ "name" }` → folder. |
+| `DELETE` | `/v1/folders/:id` | `204`; its items move to no folder. |
+| `PUT` | `/v1/secrets/:name` | Agent secret: create (`201`) or update (`200`) the Secure Note named `name` (case-insensitive) with `{ "value", "notes"? }` in its hidden `Secret` field; other fields stay. → `{ "item", "created" }`. |
+| `POST` | `/v1/secrets/:name/reveal` | `{ "value" }` of that note's hidden `Secret` field. |
+| `POST` | `/v1/generate` | `{ "length"?, "special"? }` → `{ "password" }`, not stored. |
 
-Unknown query fields are a 422. List/detail never include password, totp, notes body, keys, passkey material, or attachments.
+Unknown query and body fields are a 422.
