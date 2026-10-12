@@ -3,8 +3,16 @@
  * they come back one at a time from the reveal routes.
  */
 
-/** Bitwarden item types Chaavi serves. */
-export type ItemType = "login" | "note" | "card" | "identity" | "sshKey";
+/** Every Bitwarden item type (cipher types 1–8). */
+export type ItemType =
+  | "login"
+  | "note"
+  | "card"
+  | "identity"
+  | "sshKey"
+  | "bankAccount"
+  | "driversLicense"
+  | "passport";
 
 /** How the Bitwarden extension matches a login URI; `default` follows the account setting. */
 export type UriMatch = "default" | "domain" | "host" | "startsWith" | "exact" | "regex" | "never";
@@ -118,6 +126,53 @@ export type SshKeyDetail = {
   hasPrivateKey: boolean;
 };
 
+/** Bank account fields that are not secret, plus which secrets it holds. */
+export type BankAccountDetail = {
+  bankName: string | null;
+  nameOnAccount: string | null;
+  /** Free text, e.g. checking or savings. */
+  accountType: string | null;
+  routingNumber: string | null;
+  branchNumber: string | null;
+  swiftCode: string | null;
+  bankContactPhone: string | null;
+  hasAccountNumber: boolean;
+  hasPin: boolean;
+  hasIban: boolean;
+};
+
+/** Driver's license fields that are not secret, plus which secrets it holds. */
+export type DriversLicenseDetail = {
+  firstName: string | null;
+  middleName: string | null;
+  lastName: string | null;
+  dateOfBirth: string | null;
+  issuingCountry: string | null;
+  issuingState: string | null;
+  issueDate: string | null;
+  expirationDate: string | null;
+  issuingAuthority: string | null;
+  licenseClass: string | null;
+  hasLicenseNumber: boolean;
+};
+
+/** Passport fields that are not secret, plus which secrets it holds. */
+export type PassportDetail = {
+  surname: string | null;
+  givenName: string | null;
+  dateOfBirth: string | null;
+  sex: string | null;
+  birthPlace: string | null;
+  nationality: string | null;
+  issuingCountry: string | null;
+  passportType: string | null;
+  issuingAuthority: string | null;
+  issueDate: string | null;
+  expirationDate: string | null;
+  hasPassportNumber: boolean;
+  hasNationalIdentificationNumber: boolean;
+};
+
 type ItemBase = {
   id: string;
   name: string;
@@ -137,6 +192,9 @@ export type Item = ItemBase &
     | { type: "card"; card: CardDetail }
     | { type: "identity"; identity: IdentityDetail }
     | { type: "sshKey"; sshKey: SshKeyDetail }
+    | { type: "bankAccount"; bankAccount: BankAccountDetail }
+    | { type: "driversLicense"; driversLicense: DriversLicenseDetail }
+    | { type: "passport"; passport: PassportDetail }
   );
 
 /** A vault folder. */
@@ -201,6 +259,61 @@ export type SshKeyInput = {
   keyFingerprint?: string | undefined;
 };
 
+/** Bank account fields on write; empty clears. */
+export type BankAccountInput = Partial<
+  Record<
+    | "bankName"
+    | "nameOnAccount"
+    | "accountType"
+    | "accountNumber"
+    | "routingNumber"
+    | "branchNumber"
+    | "pin"
+    | "swiftCode"
+    | "iban"
+    | "bankContactPhone",
+    string | undefined
+  >
+>;
+
+/** Driver's license fields on write; empty clears. */
+export type DriversLicenseInput = Partial<
+  Record<
+    | "firstName"
+    | "middleName"
+    | "lastName"
+    | "dateOfBirth"
+    | "licenseNumber"
+    | "issuingCountry"
+    | "issuingState"
+    | "issueDate"
+    | "expirationDate"
+    | "issuingAuthority"
+    | "licenseClass",
+    string | undefined
+  >
+>;
+
+/** Passport fields on write; empty clears. */
+export type PassportInput = Partial<
+  Record<
+    | "surname"
+    | "givenName"
+    | "dateOfBirth"
+    | "sex"
+    | "birthPlace"
+    | "nationality"
+    | "issuingCountry"
+    | "passportNumber"
+    | "passportType"
+    | "nationalIdentificationNumber"
+    | "issuingAuthority"
+    | "issueDate"
+    | "expirationDate",
+    string | undefined
+  >
+>;
+
 type CreateBase = {
   name: string;
   folderId?: string | null | undefined;
@@ -217,6 +330,9 @@ export type CreateItemInput = CreateBase &
     | { type: "card"; card?: CardInput | undefined }
     | { type: "identity"; identity?: IdentityInput | undefined }
     | { type: "sshKey"; sshKey?: SshKeyInput | undefined }
+    | { type: "bankAccount"; bankAccount?: BankAccountInput | undefined }
+    | { type: "driversLicense"; driversLicense?: DriversLicenseInput | undefined }
+    | { type: "passport"; passport?: PassportInput | undefined }
   );
 
 /**
@@ -234,6 +350,9 @@ export type UpdateItemInput = {
   card?: CardInput | undefined;
   identity?: IdentityInput | undefined;
   sshKey?: SshKeyInput | undefined;
+  bankAccount?: BankAccountInput | undefined;
+  driversLicense?: DriversLicenseInput | undefined;
+  passport?: PassportInput | undefined;
 };
 
 /** A secret an item can reveal, by item type. */
@@ -246,6 +365,10 @@ export type SecretField =
   | "passportNumber"
   | "licenseNumber"
   | "privateKey"
+  | "accountNumber"
+  | "pin"
+  | "iban"
+  | "nationalIdentificationNumber"
   | "notes";
 
 /** Body for `POST /v1/items/:id/reveal`: a named secret, or a hidden custom field by name. */
@@ -265,9 +388,9 @@ export type TotpCode = {
   remaining: number;
 };
 
-/** Username + password for a login item (`POST /v1/items/:id/login`). */
+/** Username + password for a login item (`POST /v1/items/:id/login`); a login may have no username. */
 export type LoginCredential = {
-  username: string;
+  username: string | null;
   password: string;
 };
 

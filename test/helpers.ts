@@ -151,6 +151,9 @@ export const PASSKEY_ID = "44444444-4444-4444-4444-444444444444";
 export const CARD_ID = "55555555-5555-5555-5555-555555555555";
 export const IDENTITY_ID = "66666666-6666-6666-6666-666666666666";
 export const SECRET_NOTE_ID = "77777777-7777-7777-7777-777777777777";
+export const BANK_ID = "12121212-1212-1212-1212-121212121212";
+export const LICENSE_ID = "13131313-1313-1313-1313-131313131313";
+export const PASSPORT_ID = "14141414-1414-1414-1414-141414141414";
 export const MISSING_ID = "00000000-0000-0000-0000-000000000000";
 export const DEV_FOLDER = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 export const FINANCE_FOLDER = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -174,6 +177,12 @@ export const SAMPLE_SECRETS = [
   "hidden-recovery-code",
   "tok_live_abc",
   "passkey-private-key",
+  "ACCT-000123456789",
+  "PIN-4821",
+  "GB00ACME12345600000001",
+  "DL-D12345678",
+  "PP-A12345678",
+  "NIN-123-45-6789",
 ];
 
 /** Folders for {@link sampleCiphers}. */
@@ -186,8 +195,8 @@ export function sampleFolders(): Array<{ id: string; name: string }> {
 
 /**
  * Vault with one item of every type and every custom field kind: a login with TOTP and a
- * hidden field, a passkey login, a Wi-Fi note, a card, an identity, an SSH key, and an agent
- * secret note.
+ * hidden field, a passkey login, a Wi-Fi note, a card, an identity, an SSH key, an agent
+ * secret note, a bank account, a driver's license and a passport.
  */
 export function sampleCiphers(): Cipher[] {
   return [
@@ -274,6 +283,48 @@ export function sampleCiphers(): Cipher[] {
         { name: "Account", type: 0, value: "acct_1", linkedId: null },
         { name: "Secret", type: 1, value: "tok_live_abc", linkedId: null },
       ],
+    },
+    {
+      id: BANK_ID,
+      type: 6,
+      name: "Checking",
+      folderId: FINANCE_FOLDER,
+      bankAccount: {
+        bankName: "Acme Bank",
+        nameOnAccount: "Ada Lovelace",
+        accountType: "checking",
+        accountNumber: "ACCT-000123456789",
+        routingNumber: "011000015",
+        pin: "PIN-4821",
+        swiftCode: "ACMEUS33",
+        iban: "GB00ACME12345600000001",
+      },
+    },
+    {
+      id: LICENSE_ID,
+      type: 7,
+      name: "Michigan license",
+      driversLicense: {
+        firstName: "Ada",
+        lastName: "Lovelace",
+        licenseNumber: "DL-D12345678",
+        issuingState: "MI",
+        expirationDate: "2030-06-01",
+        licenseClass: "C",
+      },
+    },
+    {
+      id: PASSPORT_ID,
+      type: 8,
+      name: "US passport",
+      passport: {
+        surname: "Lovelace",
+        givenName: "Ada",
+        nationality: "USA",
+        passportNumber: "PP-A12345678",
+        nationalIdentificationNumber: "NIN-123-45-6789",
+        expirationDate: "2031-01-01",
+      },
     },
   ];
 }

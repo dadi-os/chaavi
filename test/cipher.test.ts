@@ -46,6 +46,14 @@ test("itemFromCipher rejects a linked field whose target is not on the item type
   );
 });
 
+test("itemFromCipher treats a typed item without its type data as corrupt", () => {
+  assert.throws(
+    () => itemFromCipher({ id: "c1", type: 3, name: "Card" }),
+    isChaavi("corrupt_item", "vault item c1 is a card item without its card data"),
+  );
+  assert.throws(() => itemFromCipher({ id: "x", type: 0, name: "?" }), isChaavi("corrupt_item", "vault item x has unknown type 0"));
+});
+
 test("applyUpdate keeps keys it does not own, such as reprompt and passkeys", () => {
   const withPasskey: Cipher = {
     ...loginCipher,

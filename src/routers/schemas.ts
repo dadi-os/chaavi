@@ -27,7 +27,7 @@ export const idParam = z.object({ id: z.string().uuid() }).strict();
 
 export const secretNameParam = z.object({ name: z.string().min(1).max(200) }).strict();
 
-const itemType = z.enum(["login", "note", "card", "identity", "sshKey"]);
+const itemType = z.enum(["login", "note", "card", "identity", "sshKey", "bankAccount", "driversLicense", "passport"]);
 
 const linkedTarget = z.enum([
   "username",
@@ -137,6 +137,55 @@ const sshKey = z
   })
   .strict();
 
+const bankAccount = z
+  .object({
+    bankName: optionalText(200),
+    nameOnAccount: optionalText(200),
+    accountType: optionalText(50),
+    accountNumber: optionalText(50),
+    routingNumber: optionalText(50),
+    branchNumber: optionalText(50),
+    pin: optionalText(20),
+    swiftCode: optionalText(20),
+    iban: optionalText(50),
+    bankContactPhone: optionalText(50),
+  })
+  .strict();
+
+const driversLicense = z
+  .object({
+    firstName: optionalText(200),
+    middleName: optionalText(200),
+    lastName: optionalText(200),
+    dateOfBirth: optionalText(30),
+    licenseNumber: optionalText(50),
+    issuingCountry: optionalText(100),
+    issuingState: optionalText(100),
+    issueDate: optionalText(30),
+    expirationDate: optionalText(30),
+    issuingAuthority: optionalText(200),
+    licenseClass: optionalText(30),
+  })
+  .strict();
+
+const passport = z
+  .object({
+    surname: optionalText(200),
+    givenName: optionalText(200),
+    dateOfBirth: optionalText(30),
+    sex: optionalText(30),
+    birthPlace: optionalText(200),
+    nationality: optionalText(100),
+    issuingCountry: optionalText(100),
+    passportNumber: optionalText(50),
+    passportType: optionalText(30),
+    nationalIdentificationNumber: optionalText(50),
+    issuingAuthority: optionalText(200),
+    issueDate: optionalText(30),
+    expirationDate: optionalText(30),
+  })
+  .strict();
+
 const baseFields = {
   name: z.string().min(1).max(200),
   folderId: z.string().uuid().nullable().optional(),
@@ -164,6 +213,9 @@ export const createItemBody = z.discriminatedUnion("type", [
   z.object({ ...baseFields, type: z.literal("card"), card: card.optional() }).strict(),
   z.object({ ...baseFields, type: z.literal("identity"), identity: identity.optional() }).strict(),
   z.object({ ...baseFields, type: z.literal("sshKey"), sshKey: sshKey.optional() }).strict(),
+  z.object({ ...baseFields, type: z.literal("bankAccount"), bankAccount: bankAccount.optional() }).strict(),
+  z.object({ ...baseFields, type: z.literal("driversLicense"), driversLicense: driversLicense.optional() }).strict(),
+  z.object({ ...baseFields, type: z.literal("passport"), passport: passport.optional() }).strict(),
 ]);
 
 export const updateItemBody = z
@@ -177,6 +229,9 @@ export const updateItemBody = z
     card: card.optional(),
     identity: identity.optional(),
     sshKey: sshKey.optional(),
+    bankAccount: bankAccount.optional(),
+    driversLicense: driversLicense.optional(),
+    passport: passport.optional(),
   })
   .strict()
   .refine((body) => Object.values(body).some((value) => value !== undefined), {
@@ -186,7 +241,21 @@ export const updateItemBody = z
 export const revealBody = z.union([
   z
     .object({
-      field: z.enum(["password", "totp", "number", "code", "ssn", "passportNumber", "licenseNumber", "privateKey", "notes"]),
+      field: z.enum([
+        "password",
+        "totp",
+        "number",
+        "code",
+        "ssn",
+        "passportNumber",
+        "licenseNumber",
+        "privateKey",
+        "accountNumber",
+        "pin",
+        "iban",
+        "nationalIdentificationNumber",
+        "notes",
+      ]),
     })
     .strict(),
   z.object({ field: z.literal("custom"), name: fieldName }).strict(),

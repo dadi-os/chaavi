@@ -6,11 +6,9 @@
 import { ChaaviError } from "../errors.js";
 import type {
   CardCredential,
-  CardInput,
   CreateItemInput,
   CustomField,
   CustomFieldInput,
-  IdentityInput,
   Item,
   ItemFilter,
   ItemType,
@@ -20,6 +18,7 @@ import type {
   PasskeyCredential,
   PasskeyInfo,
   RevealRequest,
+  SecretField,
   SecretValue,
   SshKeyInput,
   TotpCode,
@@ -39,6 +38,75 @@ const TYPE_CODES: Record<ItemType, number> = {
   card: 3,
   identity: 4,
   sshKey: 5,
+  bankAccount: 6,
+  driversLicense: 7,
+  passport: 8,
+};
+
+/** An item type whose data is a flat object of strings, each public or secret. */
+type TextType = "card" | "identity" | "bankAccount" | "driversLicense" | "passport";
+
+/**
+ * The string fields of each flat item type as Bitwarden names them: `public` are listed
+ * as values, `secret` only as `has…` flags and decrypted one at a time.
+ */
+const TEXT_FIELDS: Record<TextType, { public: readonly string[]; secret: readonly SecretField[] }> = {
+  card: { public: ["cardholderName", "brand", "expMonth", "expYear"], secret: ["number", "code"] },
+  identity: {
+    public: [
+      "title",
+      "firstName",
+      "middleName",
+      "lastName",
+      "address1",
+      "address2",
+      "address3",
+      "city",
+      "state",
+      "postalCode",
+      "country",
+      "company",
+      "email",
+      "phone",
+      "username",
+    ],
+    secret: ["ssn", "passportNumber", "licenseNumber"],
+  },
+  bankAccount: {
+    public: ["bankName", "nameOnAccount", "accountType", "routingNumber", "branchNumber", "swiftCode", "bankContactPhone"],
+    secret: ["accountNumber", "pin", "iban"],
+  },
+  driversLicense: {
+    public: [
+      "firstName",
+      "middleName",
+      "lastName",
+      "dateOfBirth",
+      "issuingCountry",
+      "issuingState",
+      "issueDate",
+      "expirationDate",
+      "issuingAuthority",
+      "licenseClass",
+    ],
+    secret: ["licenseNumber"],
+  },
+  passport: {
+    public: [
+      "surname",
+      "givenName",
+      "dateOfBirth",
+      "sex",
+      "birthPlace",
+      "nationality",
+      "issuingCountry",
+      "passportType",
+      "issuingAuthority",
+      "issueDate",
+      "expirationDate",
+    ],
+    secret: ["passportNumber", "nationalIdentificationNumber"],
+  },
 };
 
 const FIELD_TEXT = 0;
@@ -55,7 +123,10 @@ const MATCH_CODES: Record<Exclude<UriMatch, "default">, number> = {
   never: 5,
 };
 
-/** Bitwarden's linked-field ids per item type (`LoginLinkedId`, `CardLinkedId`, `IdentityLinkedId`). */
+/**
+ * Bitwarden's linked-field ids per item type (`LoginLinkedId`, `CardLinkedId`,
+ * `IdentityLinkedId`). The newer types define none.
+ */
 const LINKED_IDS: Record<ItemType, Partial<Record<LinkedTarget, number>>> = {
   login: { username: 100, password: 101 },
   card: { cardholderName: 300, expMonth: 301, expYear: 302, code: 303, brand: 304, number: 305 },
@@ -82,30 +153,10 @@ const LINKED_IDS: Record<ItemType, Partial<Record<LinkedTarget, number>>> = {
   },
   note: {},
   sshKey: {},
+  bankAccount: {},
+  driversLicense: {},
+  passport: {},
 };
-
-const CARD_KEYS = ["cardholderName", "brand", "number", "expMonth", "expYear", "code"] as const;
-
-const IDENTITY_KEYS = [
-  "title",
-  "firstName",
-  "middleName",
-  "lastName",
-  "address1",
-  "address2",
-  "address3",
-  "city",
-  "state",
-  "postalCode",
-  "country",
-  "company",
-  "email",
-  "phone",
-  "username",
-  "ssn",
-  "passportNumber",
-  "licenseNumber",
-] as const;
 
 /** A custom field as `bw` stores it. */
 export type RawField = {
@@ -133,30 +184,44 @@ export type Cipher = {
     fido2Credentials?: unknown;
     [key: string]: unknown;
   } | null;
-  card?: Record<string, unknown> | null;
-  identity?: Record<string, unknown> | null;
-  sshKey?: Record<string, unknown> | null;
   [key: string]: unknown;
 };
 
-/** Item type of a cipher, or null for a Bitwarden type Chaavi does not serve. */
-export function itemTypeOf(cipher: Cipher): ItemType | null {
+/** Item type of a cipher. Bitwarden has no type outside 1–8, so another is a corrupt item. */
+export function itemTypeOf(cipher: Cipher): ItemType {
   const code = typeof cipher.type === "number" ? cipher.type : Number(cipher.type);
   for (const [type, value] of Object.entries(TYPE_CODES)) {
     if (value === code) {
       return type as ItemType;
     }
   }
-  return null;
+  throw corrupt(cipher, `has unknown type ${String(cipher.type)}`);
+}
+
+/**
+ * The object holding a typed item's own data (`login`, `card`, …). Its absence on an item
+ * of that type is a corrupt item, never an empty one.
+ */
+function typeData(cipher: Cipher, key: Exclude<ItemType, "note">): Record<string, unknown> {
+  const data = cipher[key];
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw corrupt(cipher, `is a ${key} item without its ${key} data`);
+  }
+  return data as Record<string, unknown>;
+}
+
+/** `has` + the field name with its first letter raised: `accountNumber` → `hasAccountNumber`. */
+function hasKey(field: string): string {
+  return `has${field[0]!.toUpperCase()}${field.slice(1)}`;
 }
 
 /** Map a cipher to its listed item: every non-secret field, and only flags for secrets. */
 export function itemFromCipher(cipher: Cipher): Item {
   const id = text(cipher.id);
   if (id === null) {
-    throw unreachable("vault item missing id");
+    throw corrupt(cipher, "has no id");
   }
-  const type = requireType(cipher);
+  const type = itemTypeOf(cipher);
   const base = {
     id,
     name: typeof cipher.name === "string" ? cipher.name : "",
@@ -166,81 +231,48 @@ export function itemFromCipher(cipher: Cipher): Item {
     fields: rawFields(cipher).map((field) => customField(field, type)),
     revisionDate: text(cipher.revisionDate),
   };
+  if (type === "note") {
+    return { ...base, type };
+  }
+  const data = typeData(cipher, type);
   if (type === "login") {
-    const login = cipher.login ?? {};
     return {
       ...base,
       type,
       login: {
-        username: text(login.username),
-        uris: loginUris(cipher),
-        hasPassword: text(login.password) !== null,
-        hasTotp: text(login.totp) !== null,
+        username: text(data.username),
+        uris: loginUris(data),
+        hasPassword: text(data.password) !== null,
+        hasTotp: text(data.totp) !== null,
         passkeys: fido2List(cipher).map(passkeyInfo),
       },
     };
   }
-  if (type === "card") {
-    const card = cipher.card ?? {};
-    return {
-      ...base,
-      type,
-      card: {
-        cardholderName: text(card.cardholderName),
-        brand: text(card.brand),
-        expMonth: text(card.expMonth),
-        expYear: text(card.expYear),
-        hasNumber: text(card.number) !== null,
-        hasCode: text(card.code) !== null,
-      },
-    };
-  }
-  if (type === "identity") {
-    const identity = cipher.identity ?? {};
-    return {
-      ...base,
-      type,
-      identity: {
-        title: text(identity.title),
-        firstName: text(identity.firstName),
-        middleName: text(identity.middleName),
-        lastName: text(identity.lastName),
-        address1: text(identity.address1),
-        address2: text(identity.address2),
-        address3: text(identity.address3),
-        city: text(identity.city),
-        state: text(identity.state),
-        postalCode: text(identity.postalCode),
-        country: text(identity.country),
-        company: text(identity.company),
-        email: text(identity.email),
-        phone: text(identity.phone),
-        username: text(identity.username),
-        hasSsn: text(identity.ssn) !== null,
-        hasPassportNumber: text(identity.passportNumber) !== null,
-        hasLicenseNumber: text(identity.licenseNumber) !== null,
-      },
-    };
-  }
   if (type === "sshKey") {
-    const sshKey = cipher.sshKey ?? {};
     return {
       ...base,
       type,
       sshKey: {
-        publicKey: text(sshKey.publicKey),
-        keyFingerprint: text(sshKey.keyFingerprint),
-        hasPrivateKey: text(sshKey.privateKey) !== null,
+        publicKey: text(data.publicKey),
+        keyFingerprint: text(data.keyFingerprint),
+        hasPrivateKey: text(data.privateKey) !== null,
       },
     };
   }
-  return { ...base, type };
+  const detail: Record<string, string | boolean | null> = {};
+  for (const field of TEXT_FIELDS[type].public) {
+    detail[field] = text(data[field]);
+  }
+  for (const field of TEXT_FIELDS[type].secret) {
+    detail[hasKey(field)] = text(data[field]) !== null;
+  }
+  return { ...base, type, [type]: detail } as Item;
 }
 
 /**
  * Keep items matching the list query: `type` exactly, `uri` against login websites, and `q`
- * against the name, login username and websites, card brand and cardholder, identity name
- * and email, and text custom fields.
+ * against the name, login username and websites, the public text of the other types, and
+ * text custom fields.
  */
 export function filterItems(items: Item[], filter: ItemFilter): Item[] {
   return items.filter((item) => {
@@ -271,11 +303,14 @@ function searchText(item: Item): string[] {
       out.push(item.login.username);
     }
   }
-  if (item.type === "card") {
-    out.push(item.card.brand ?? "", item.card.cardholderName ?? "");
-  }
-  if (item.type === "identity") {
-    out.push(item.identity.firstName ?? "", item.identity.lastName ?? "", item.identity.email ?? "");
+  if (item.type === "card" || item.type === "identity" || item.type === "bankAccount" || item.type === "driversLicense" || item.type === "passport") {
+    const detail = (item as unknown as Record<string, Record<string, unknown>>)[item.type]!;
+    for (const field of TEXT_FIELDS[item.type].public) {
+      const value = detail[field];
+      if (typeof value === "string") {
+        out.push(value);
+      }
+    }
   }
   for (const field of item.fields) {
     if (field.type === "text") {
@@ -326,21 +361,19 @@ export function cipherForCreate(input: CreateItemInput): Cipher {
       totp: checkedTotp(login.totp),
       uris: (login.uris ?? []).map(rawUri),
     };
+    return cipher;
   }
   if (input.type === "note") {
     cipher.secureNote = { type: 0 };
-  }
-  if (input.type === "card") {
-    cipher.card = {};
-    applyCard(cipher.card, input.card ?? {});
-  }
-  if (input.type === "identity") {
-    cipher.identity = {};
-    applyIdentity(cipher.identity, input.identity ?? {});
+    return cipher;
   }
   if (input.type === "sshKey") {
     cipher.sshKey = sshKeyForCreate(input.sshKey ?? {});
+    return cipher;
   }
+  const data: Record<string, unknown> = {};
+  applyText(data, input.type, (input as unknown as Record<string, Record<string, string | undefined> | undefined>)[input.type] ?? {});
+  cipher[input.type] = data;
   return cipher;
 }
 
@@ -349,8 +382,8 @@ export function cipherForCreate(input: CreateItemInput): Cipher {
  * for `bw edit item`. The type object must match the item's type.
  */
 export function applyUpdate(cipher: Cipher, input: UpdateItemInput): Cipher {
-  const type = requireType(cipher);
-  for (const key of ["login", "card", "identity", "sshKey"] as const) {
+  const type = itemTypeOf(cipher);
+  for (const key of ["login", "card", "identity", "sshKey", "bankAccount", "driversLicense", "passport"] as const) {
     if (input[key] !== undefined && key !== type) {
       throw new ChaaviError(422, "invalid_request", `${key} fields do not apply to a ${type} item`);
     }
@@ -372,8 +405,7 @@ export function applyUpdate(cipher: Cipher, input: UpdateItemInput): Cipher {
     next.fields = fieldsForWrite(input.fields, rawFields(cipher), type);
   }
   if (input.login !== undefined) {
-    const login = next.login ?? {};
-    next.login = login;
+    const login = typeData(next, "login");
     if (input.login.username !== undefined) {
       login.username = emptyToNull(input.login.username);
     }
@@ -387,19 +419,8 @@ export function applyUpdate(cipher: Cipher, input: UpdateItemInput): Cipher {
       login.uris = input.login.uris.map(rawUri);
     }
   }
-  if (input.card !== undefined) {
-    const card = next.card ?? {};
-    next.card = card;
-    applyCard(card, input.card);
-  }
-  if (input.identity !== undefined) {
-    const identity = next.identity ?? {};
-    next.identity = identity;
-    applyIdentity(identity, input.identity);
-  }
   if (input.sshKey !== undefined) {
-    const sshKey = next.sshKey ?? {};
-    next.sshKey = sshKey;
+    const sshKey = typeData(next, "sshKey");
     for (const key of ["privateKey", "publicKey", "keyFingerprint"] as const) {
       const value = input.sshKey[key];
       if (value !== undefined) {
@@ -410,12 +431,34 @@ export function applyUpdate(cipher: Cipher, input: UpdateItemInput): Cipher {
       }
     }
   }
+  for (const key of ["card", "identity", "bankAccount", "driversLicense", "passport"] as const) {
+    const values = input[key];
+    if (values !== undefined) {
+      applyText(typeData(next, key), key, values);
+    }
+  }
   return next;
 }
 
+/** Item types that hold each named secret. */
+const SECRET_OWNERS: Record<Exclude<SecretField, "notes">, readonly ItemType[]> = {
+  password: ["login"],
+  totp: ["login"],
+  number: ["card"],
+  code: ["card"],
+  ssn: ["identity"],
+  passportNumber: ["identity", "passport"],
+  licenseNumber: ["identity", "driversLicense"],
+  privateKey: ["sshKey"],
+  accountNumber: ["bankAccount"],
+  pin: ["bankAccount"],
+  iban: ["bankAccount"],
+  nationalIdentificationNumber: ["passport"],
+};
+
 /** One secret of an item, decrypted, for `POST /v1/items/:id/reveal`. */
 export function revealFromCipher(cipher: Cipher, request: RevealRequest): SecretValue {
-  const type = requireType(cipher);
+  const type = itemTypeOf(cipher);
   if (request.field === "custom") {
     const field = uniqueField(cipher, request.name);
     if (Number(field.type) !== FIELD_HIDDEN) {
@@ -426,49 +469,38 @@ export function revealFromCipher(cipher: Cipher, request: RevealRequest): Secret
   if (request.field === "notes") {
     return { value: required(cipher.notes, "item has no notes") };
   }
-  const owner: Record<Exclude<RevealRequest["field"], "custom" | "notes">, ItemType> = {
-    password: "login",
-    totp: "login",
-    number: "card",
-    code: "card",
-    ssn: "identity",
-    passportNumber: "identity",
-    licenseNumber: "identity",
-    privateKey: "sshKey",
-  };
-  if (owner[request.field] !== type) {
+  if (type === "note" || !SECRET_OWNERS[request.field].includes(type)) {
     throw new ChaaviError(422, "invalid_request", `a ${type} item has no ${request.field}`);
   }
-  const source: Record<string, unknown> =
-    type === "login" ? (cipher.login ?? {}) : type === "card" ? (cipher.card ?? {}) : type === "identity" ? (cipher.identity ?? {}) : (cipher.sshKey ?? {});
-  return { value: required(source[request.field], `item has no ${request.field}`) };
+  return { value: required(typeData(cipher, type)[request.field], `item has no ${request.field}`) };
 }
 
 /** Current one-time code of a login cipher. */
 export function totpFromCipher(cipher: Cipher, nowMs: number): TotpCode {
-  if (requireType(cipher) !== "login") {
+  if (itemTypeOf(cipher) !== "login") {
     throw new ChaaviError(422, "invalid_request", "item is not a login");
   }
-  return totpCode(required(cipher.login?.totp, "item has no authenticator key"), nowMs);
+  return totpCode(required(typeData(cipher, "login").totp, "item has no authenticator key"), nowMs);
 }
 
-/** Username + password for a login cipher. */
+/** Username + password for a login cipher; a login without a username gives null. */
 export function loginFromCipher(cipher: Cipher): LoginCredential {
-  if (requireType(cipher) !== "login") {
+  if (itemTypeOf(cipher) !== "login") {
     throw new ChaaviError(422, "invalid_request", "item is not a login");
   }
+  const login = typeData(cipher, "login");
   return {
-    username: text(cipher.login?.username) ?? "",
-    password: required(cipher.login?.password, "item has no password"),
+    username: text(login.username),
+    password: required(login.password, "item has no password"),
   };
 }
 
 /** Decrypted card fields for a form fill; the number is required. */
 export function cardFromCipher(cipher: Cipher): CardCredential {
-  if (requireType(cipher) !== "card") {
+  if (itemTypeOf(cipher) !== "card") {
     throw new ChaaviError(422, "invalid_request", "item is not a card");
   }
-  const card = cipher.card ?? {};
+  const card = typeData(cipher, "card");
   return {
     cardholderName: text(card.cardholderName),
     brand: text(card.brand),
@@ -484,7 +516,7 @@ export function cardFromCipher(cipher: Cipher): CardCredential {
  * secret is a Secure Note named for the secret with its value there.
  */
 export function noteSecretFromCipher(cipher: Cipher): SecretValue {
-  if (requireType(cipher) !== "note") {
+  if (itemTypeOf(cipher) !== "note") {
     throw new ChaaviError(422, "invalid_request", "item is not a secure note");
   }
   const field = uniqueField(cipher, SECRET_FIELD);
@@ -499,7 +531,7 @@ export function noteSecretFromCipher(cipher: Cipher): SecretValue {
  * notes to `notes` when given.
  */
 export function applySecret(cipher: Cipher, value: string, notes: string | undefined): Cipher {
-  if (requireType(cipher) !== "note") {
+  if (itemTypeOf(cipher) !== "note") {
     throw new ChaaviError(422, "invalid_request", "item is not a secure note");
   }
   const fields = rawFields(cipher);
@@ -532,9 +564,10 @@ export function secretNoteForCreate(name: string, value: string, notes: string |
  * `WebAuthn.addCredential` (standard base64 PKCS#8 / credential id / user handle).
  */
 export function passkeyFromCipher(cipher: Cipher): PasskeyCredential {
-  if (requireType(cipher) !== "login") {
+  if (itemTypeOf(cipher) !== "login") {
     throw new ChaaviError(422, "invalid_request", "item is not a login");
   }
+  typeData(cipher, "login");
   const raw = fido2List(cipher)[0];
   if (raw === undefined) {
     throw new ChaaviError(422, "invalid_request", "item has no passkey");
@@ -562,13 +595,10 @@ export function passkeyFromCipher(cipher: Cipher): PasskeyCredential {
   };
 }
 
-/** Item type of a cipher; an unserved type is an upstream error. */
-function requireType(cipher: Cipher): ItemType {
-  const type = itemTypeOf(cipher);
-  if (type === null) {
-    throw new ChaaviError(422, "invalid_request", `item type ${String(cipher.type)} is not supported`);
-  }
-  return type;
+/** A 502 `corrupt_item` naming the vault item whose stored data is not a valid item. */
+function corrupt(cipher: Cipher, problem: string): ChaaviError {
+  const id = typeof cipher.id === "string" && cipher.id.length > 0 ? cipher.id : "without an id";
+  return new ChaaviError(502, "corrupt_item", `vault item ${id} ${problem}`);
 }
 
 /** A non-empty string, else null. */
@@ -678,8 +708,8 @@ function fieldsForWrite(inputs: CustomFieldInput[], existing: RawField[], type: 
 }
 
 /** Login websites as listed; a null match is the account default. */
-function loginUris(cipher: Cipher): LoginUri[] {
-  const uris = cipher.login?.uris;
+function loginUris(login: Record<string, unknown>): LoginUri[] {
+  const uris = login.uris;
   if (!Array.isArray(uris)) {
     return [];
   }
@@ -702,29 +732,22 @@ function rawUri(entry: { uri: string; match?: UriMatch | undefined }): { uri: st
   return { uri: entry.uri, match };
 }
 
-/** Write card fields: empty clears; the month is stored without a leading zero. */
-function applyCard(card: Record<string, unknown>, input: CardInput): void {
-  for (const key of CARD_KEYS) {
+/**
+ * Write a flat item's string fields: empty clears. A card number drops its spaces and
+ * dashes, and a card month is stored without a leading zero.
+ */
+function applyText(data: Record<string, unknown>, type: TextType, input: Record<string, string | undefined>): void {
+  for (const key of [...TEXT_FIELDS[type].public, ...TEXT_FIELDS[type].secret]) {
     const value = input[key];
     if (value === undefined) {
       continue;
     }
-    if (key === "number") {
-      card[key] = emptyToNull(value.replace(/[\s-]/g, ""));
-    } else if (key === "expMonth") {
-      card[key] = value.length === 0 ? null : String(Number(value));
+    if (type === "card" && key === "number") {
+      data[key] = emptyToNull(value.replace(/[\s-]/g, ""));
+    } else if (type === "card" && key === "expMonth") {
+      data[key] = value.length === 0 ? null : String(Number(value));
     } else {
-      card[key] = emptyToNull(value);
-    }
-  }
-}
-
-/** Write identity fields: empty clears. */
-function applyIdentity(identity: Record<string, unknown>, input: IdentityInput): void {
-  for (const key of IDENTITY_KEYS) {
-    const value = input[key];
-    if (value !== undefined) {
-      identity[key] = emptyToNull(value);
+      data[key] = emptyToNull(value);
     }
   }
 }

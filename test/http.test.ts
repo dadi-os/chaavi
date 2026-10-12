@@ -3,15 +3,18 @@ import { after, beforeEach, test } from "node:test";
 import { buildApp } from "../src/app.js";
 import { BwVault } from "../src/vault/bw.js";
 import {
+  BANK_ID,
   CARD_ID,
   DEV_FOLDER,
   FINANCE_FOLDER,
   FakeBw,
   IDENTITY_ID,
+  LICENSE_ID,
   LOGIN_ID,
   MISSING_ID,
   NOTE_ID,
   PASSKEY_ID,
+  PASSPORT_ID,
   SAMPLE_SECRETS,
   SECRET_NOTE_ID,
   SSH_ID,
@@ -79,7 +82,18 @@ test("GET /v1/items lists every type with its public fields and no secret value"
   assert.equal(res.statusCode, 200);
   assertNoSecrets(res.body);
   const items = res.json().items as Array<Record<string, any>>;
-  assert.deepEqual(items.map((item) => item.type).sort(), ["card", "identity", "login", "login", "note", "note", "sshKey"]);
+  assert.deepEqual(items.map((item) => item.type).sort(), [
+    "bankAccount",
+    "card",
+    "driversLicense",
+    "identity",
+    "login",
+    "login",
+    "note",
+    "note",
+    "passport",
+    "sshKey",
+  ]);
 
   const github = items.find((item) => item.id === LOGIN_ID)!;
   assert.equal(github.folderId, DEV_FOLDER);
@@ -125,6 +139,27 @@ test("GET /v1/items lists every type with its public fields and no secret value"
   const ssh = items.find((item) => item.id === SSH_ID)!;
   assert.deepEqual(ssh.sshKey, { publicKey: "ssh-ed25519 AAAAtest", keyFingerprint: "SHA256:test", hasPrivateKey: true });
 
+  const bank = items.find((item) => item.id === BANK_ID)!;
+  assert.deepEqual(bank.bankAccount, {
+    bankName: "Acme Bank",
+    nameOnAccount: "Ada Lovelace",
+    accountType: "checking",
+    routingNumber: "011000015",
+    branchNumber: null,
+    swiftCode: "ACMEUS33",
+    bankContactPhone: null,
+    hasAccountNumber: true,
+    hasPin: true,
+    hasIban: true,
+  });
+  const license = items.find((item) => item.id === LICENSE_ID)!;
+  assert.equal(license.driversLicense.issuingState, "MI");
+  assert.equal(license.driversLicense.hasLicenseNumber, true);
+  const passport = items.find((item) => item.id === PASSPORT_ID)!;
+  assert.equal(passport.passport.nationality, "USA");
+  assert.equal(passport.passport.hasPassportNumber, true);
+  assert.equal(passport.passport.hasNationalIdentificationNumber, true);
+
   const note = items.find((item) => item.id === NOTE_ID)!;
   assert.equal(note.hasNotes, true);
   assert.equal("notes" in note, false);
@@ -136,7 +171,9 @@ test("GET /v1/items filters by q, uri and type", async () => {
   assert.deepEqual(await ids("?q=octo"), [LOGIN_ID]);
   assert.deepEqual(await ids("?q=visa"), [CARD_ID]);
   assert.deepEqual(await ids("?q=dadi"), [LOGIN_ID]);
-  assert.deepEqual(await ids("?q=lovelace"), [CARD_ID, IDENTITY_ID]);
+  assert.deepEqual(await ids("?q=lovelace"), [CARD_ID, IDENTITY_ID, BANK_ID, LICENSE_ID, PASSPORT_ID]);
+  assert.deepEqual(await ids("?q=acme"), [BANK_ID]);
+  assert.deepEqual(await ids("?type=passport"), [PASSPORT_ID]);
   assert.deepEqual(await ids("?uri=github.com"), [LOGIN_ID]);
   assert.deepEqual(await ids("?type=sshKey"), [SSH_ID]);
   assert.deepEqual(await ids("?type=note"), [NOTE_ID, SECRET_NOTE_ID]);
@@ -200,7 +237,7 @@ test("POST /v1/items creates a note, card, identity and generated SSH key", asyn
   assert.equal(card.statusCode, 201);
   assert.equal(card.json().card.expMonth, "2");
   assert.equal(card.body.includes("378282246310005"), false);
-  assert.equal(fake.stored(card.json().id).card?.number, "378282246310005");
+  assert.equal((fake.stored(card.json().id).card as Record<string, unknown>).number, "378282246310005");
 
   const identity = await app.inject({
     method: "POST",
@@ -212,12 +249,40 @@ test("POST /v1/items creates a note, card, identity and generated SSH key", asyn
   assert.equal(identity.json().identity.hasSsn, true);
   assert.equal(identity.body.includes("111-22-3333"), false);
 
+  const bank = await app.inject({
+    method: "POST",
+    url: "/v1/items",
+    payload: { type: "bankAccount", name: "Savings", bankAccount: { bankName: "Acme", accountNumber: "999000111", pin: "0000" } },
+  });
+  assert.equal(bank.statusCode, 201);
+  assert.equal(bank.json().bankAccount.bankName, "Acme");
+  assert.equal(bank.json().bankAccount.hasAccountNumber, true);
+  assert.equal(bank.body.includes("999000111"), false);
+  assert.equal((fake.stored(bank.json().id).bankAccount as Record<string, unknown>).accountNumber, "999000111");
+
+  const license = await app.inject({
+    method: "POST",
+    url: "/v1/items",
+    payload: { type: "driversLicense", name: "License", driversLicense: { lastName: "Lovelace", licenseNumber: "L-1" } },
+  });
+  assert.equal(license.statusCode, 201);
+  assert.equal(license.json().driversLicense.hasLicenseNumber, true);
+
+  const passport = await app.inject({
+    method: "POST",
+    url: "/v1/items",
+    payload: { type: "passport", name: "Passport", passport: { surname: "Lovelace", passportNumber: "P-1" } },
+  });
+  assert.equal(passport.statusCode, 201);
+  assert.equal(passport.json().passport.surname, "Lovelace");
+  assert.equal(passport.body.includes("P-1"), false);
+
   const ssh = await app.inject({ method: "POST", url: "/v1/items", payload: { type: "sshKey", name: "New key" } });
   assert.equal(ssh.statusCode, 201);
   assert.match(ssh.json().sshKey.publicKey, /^ssh-ed25519 /);
   assert.match(ssh.json().sshKey.keyFingerprint, /^SHA256:/);
   assert.equal(ssh.body.includes("PRIVATE KEY"), false);
-  assert.match(String(fake.stored(ssh.json().id).sshKey?.privateKey), /^-----BEGIN OPENSSH PRIVATE KEY-----/);
+  assert.match(String((fake.stored(ssh.json().id).sshKey as Record<string, unknown>).privateKey), /^-----BEGIN OPENSSH PRIVATE KEY-----/);
 });
 
 test("POST /v1/items rejects invalid bodies with invalid_request", async () => {
@@ -279,6 +344,12 @@ test("PATCH /v1/items/:id edits fields, keeps an untouched hidden value, moves a
 
   const cleared = await app.inject({ method: "PATCH", url: `/v1/items/${CARD_ID}`, payload: { card: { code: "" } } });
   assert.equal(cleared.json().card.hasCode, false);
+
+  const bank = await app.inject({ method: "PATCH", url: `/v1/items/${BANK_ID}`, payload: { bankAccount: { bankName: "Acme Credit Union", pin: "" } } });
+  assert.equal(bank.statusCode, 200);
+  assert.equal(bank.json().bankAccount.bankName, "Acme Credit Union");
+  assert.equal(bank.json().bankAccount.hasPin, false);
+  assert.equal(bank.json().bankAccount.hasAccountNumber, true);
 });
 
 test("PATCH /v1/items/:id refuses a mismatched type, an empty body, and unknown ids", async () => {
@@ -322,6 +393,11 @@ test("POST /v1/items/:id/reveal returns one secret and refuses what the item lac
   assert.deepEqual((await reveal(IDENTITY_ID, { field: "licenseNumber" })).json(), { value: "D-555" });
   assert.match((await reveal(SSH_ID, { field: "privateKey" })).json().value, /OPENSSH PRIVATE KEY/);
   assert.deepEqual((await reveal(SECRET_NOTE_ID, { field: "custom", name: "Secret" })).json(), { value: "tok_live_abc" });
+  assert.deepEqual((await reveal(BANK_ID, { field: "accountNumber" })).json(), { value: "ACCT-000123456789" });
+  assert.deepEqual((await reveal(BANK_ID, { field: "iban" })).json(), { value: "GB00ACME12345600000001" });
+  assert.deepEqual((await reveal(LICENSE_ID, { field: "licenseNumber" })).json(), { value: "DL-D12345678" });
+  assert.deepEqual((await reveal(PASSPORT_ID, { field: "passportNumber" })).json(), { value: "PP-A12345678" });
+  assert.deepEqual((await reveal(PASSPORT_ID, { field: "nationalIdentificationNumber" })).json(), { value: "NIN-123-45-6789" });
 
   const refusals: Array<[string, Record<string, unknown>, string]> = [
     [CARD_ID, { field: "password" }, "a card item has no password"],
@@ -329,6 +405,8 @@ test("POST /v1/items/:id/reveal returns one secret and refuses what the item lac
     [LOGIN_ID, { field: "custom", name: "Org" }, 'field "Org" is not hidden'],
     [LOGIN_ID, { field: "custom", name: "Nope" }, 'item has no field named "Nope"'],
     [CARD_ID, { field: "notes" }, "item has no notes"],
+    [PASSPORT_ID, { field: "licenseNumber" }, "a passport item has no licenseNumber"],
+    [LICENSE_ID, { field: "pin" }, "a driversLicense item has no pin"],
   ];
   for (const [id, payload, message] of refusals) {
     const res = await reveal(id, payload);
@@ -459,16 +537,29 @@ test("POST /v1/generate returns a fresh password of the asked length", async () 
   assert.equal(bad.statusCode, 422);
 });
 
-test("ciphers of an unsupported type stay out of the catalog with one warn line", async () => {
-  fake.seed([...sampleCiphers(), { id: "88888888-8888-8888-8888-888888888888", type: 6, name: "Bank" }], sampleFolders());
-  log.lines.length = 0;
+test("a cipher that is not a valid item fails the sync with corrupt_item naming it", async () => {
+  const bad = "99999999-9999-9999-9999-999999999999";
+  for (const cipher of [
+    { id: bad, type: 9, name: "Future type" },
+    { id: bad, type: 3, name: "Card without card data", card: null },
+    { id: bad, type: 1, name: "Login without login data" },
+  ]) {
+    fake.seed([...sampleCiphers(), cipher], sampleFolders());
+    await assert.rejects(vault.refreshCatalog(), (err: unknown) => {
+      const error = err as { type?: string; message?: string };
+      return error.type === "corrupt_item" && String(error.message).startsWith(`vault item ${bad} `);
+    });
+  }
+});
+
+test("POST /v1/items/:id/login gives a null username for a login without one", async () => {
+  fake.seed(
+    [{ id: LOGIN_ID, type: 1, name: "PIN only", login: { username: null, password: "hunter2", uris: [] } }],
+    sampleFolders(),
+  );
   await vault.refreshCatalog();
-  await vault.refreshCatalog();
-  const res = await app.inject({ method: "GET", url: "/v1/items" });
-  assert.equal((res.json().items as unknown[]).length, sampleCiphers().length);
-  const warns = log.lines.filter((line) => line.attrs?.code === "unsupported_item_type");
-  assert.equal(warns.length, 1);
-  assert.equal(warns[0]?.attrs?.count, 1);
+  const res = await app.inject({ method: "POST", url: `/v1/items/${LOGIN_ID}/login` });
+  assert.deepEqual(res.json(), { username: null, password: "hunter2" });
 });
 
 test("a bw failure reports the CLI's own first stderr line as vault_unreachable", async () => {

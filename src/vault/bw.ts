@@ -30,7 +30,6 @@ import {
   cipherForCreate,
   filterItems,
   itemFromCipher,
-  itemTypeOf,
   loginFromCipher,
   noteSecretFromCipher,
   passkeyFromCipher,
@@ -65,8 +64,6 @@ export class BwVault implements Vault {
   #session: Promise<string> | undefined;
   #items: Item[] = [];
   #folders: Folder[] = [];
-  /** Ciphers of a type Chaavi does not serve at the last pull; logged when it changes. */
-  #skipped = 0;
   #refresh: Promise<void> | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
   /** Serializes catalog writes so a stale sync cannot overwrite a write. */
@@ -305,9 +302,9 @@ export class BwVault implements Vault {
   }
 
   /**
-   * Sync from Vaultwarden and replace the in-memory catalog. Ciphers of a Bitwarden type
-   * Chaavi does not serve (bank accounts, driver's licenses) are left out and counted in a
-   * warn line whenever their number changes.
+   * Sync from Vaultwarden and replace the in-memory catalog. A cipher that does not map to
+   * an item fails the whole pull with `corrupt_item` naming it, so the catalog is never
+   * missing an item silently.
    */
   async pullCatalog(): Promise<void> {
     await this.bw(["sync"], { session: true });
@@ -316,25 +313,12 @@ export class BwVault implements Vault {
     if (!Array.isArray(rawItems) || !Array.isArray(rawFolders)) {
       throw unreachable("vault returned invalid json");
     }
-    const items: Item[] = [];
-    let skipped = 0;
-    for (const entry of rawItems) {
-      const cipher = asCipher(entry);
-      if (itemTypeOf(cipher) === null) {
-        skipped += 1;
-        continue;
-      }
-      items.push(itemFromCipher(cipher));
-    }
+    const items = rawItems.map((entry) => itemFromCipher(asCipher(entry)));
     const folders: Folder[] = [];
     for (const entry of rawFolders) {
       if (typeof entry === "object" && entry !== null && (entry as { id?: unknown }).id !== null) {
         folders.push(folderFrom(entry));
       }
-    }
-    if (skipped !== this.#skipped) {
-      this.#skipped = skipped;
-      this.#log.warn("vault items of an unsupported type left out", { code: "unsupported_item_type", count: skipped });
     }
     this.#items = items;
     this.#folders = folders;
