@@ -87,7 +87,7 @@ export class FakeBw {
       return ok(this.ciphers);
     }
     if (verb === "list" && noun === "folders") {
-      return ok([{ object: "folder", id: null, name: "No Folder" }, ...this.folders]);
+      return ok([{ object: "folder", id: "", name: "No Folder" }, ...this.folders]);
     }
     if (verb === "get" && noun === "item") {
       const cipher = this.ciphers.find((entry) => entry.id === a);

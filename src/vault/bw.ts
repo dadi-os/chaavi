@@ -304,7 +304,8 @@ export class BwVault implements Vault {
   /**
    * Sync from Vaultwarden and replace the in-memory catalog. A cipher that does not map to
    * an item fails the whole pull with `corrupt_item` naming it, so the catalog is never
-   * missing an item silently.
+   * missing an item silently. `bw list folders` ends with a "No Folder" entry whose id is
+   * empty (a FolderView with no id); it is not a folder, so the catalog leaves it out.
    */
   async pullCatalog(): Promise<void> {
     await this.bw(["sync"], { session: true });
@@ -316,7 +317,7 @@ export class BwVault implements Vault {
     const items = rawItems.map((entry) => itemFromCipher(asCipher(entry)));
     const folders: Folder[] = [];
     for (const entry of rawFolders) {
-      if (typeof entry === "object" && entry !== null && (entry as { id?: unknown }).id !== null) {
+      if (typeof entry === "object" && entry !== null && (entry as { id?: unknown }).id !== "") {
         folders.push(folderFrom(entry));
       }
     }
