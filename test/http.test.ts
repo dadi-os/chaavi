@@ -165,6 +165,21 @@ test("GET /v1/items lists every type with its public fields and no secret value"
   assert.equal("notes" in note, false);
 });
 
+test("GET /v1/items?folder= takes a folder's subfolders too, ignores case, and an unknown folder is a 404", async () => {
+  const ids = async (query: string) =>
+    ((await app.inject({ method: "GET", url: `/v1/items${query}` })).json().items as Array<{ id: string }>).map((item) => item.id);
+  const nested = (await app.inject({ method: "POST", url: "/v1/folders", payload: { name: "Dev/api" } })).json();
+  await app.inject({ method: "PATCH", url: `/v1/items/${CARD_ID}`, payload: { folderId: nested.id } });
+  assert.deepEqual(await ids("?folder=Dev/api"), [CARD_ID]);
+  const dev = await ids("?folder=dev");
+  assert.ok(dev.includes(LOGIN_ID) && dev.includes(CARD_ID));
+  assert.equal(dev.includes(BANK_ID), false);
+  assert.deepEqual(await ids("?folder=Dev&type=card"), [CARD_ID]);
+  const missing = await app.inject({ method: "GET", url: "/v1/items?folder=Nope" });
+  assert.equal(missing.statusCode, 404);
+  assert.equal(missing.json().error.type, "not_found");
+});
+
 test("GET /v1/items filters by q, uri and type", async () => {
   const ids = async (query: string) =>
     ((await app.inject({ method: "GET", url: `/v1/items${query}` })).json().items as Array<{ id: string }>).map((item) => item.id);

@@ -95,7 +95,7 @@ Items are type-aware: every item has `id`, `name`, `type` (`login` \| `note` \| 
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/health` | `{ "status": "ok", "vault": "ready" \| "unconfigured" }`. Does not ping Vaultwarden. |
-| `GET` | `/v1/items` | Catalog from memory. Query: `q` (name, username, websites, card brand/holder, identity name/email, text fields), `uri`, `type`. |
+| `GET` | `/v1/items` | Catalog from memory. Query: `q` (name, username, websites, card brand/holder, identity name/email, text fields), `uri`, `type`, `folder` (a folder name, case-insensitive; it takes the folders nested under it too, since a slash in a name nests: `Dev` takes `Dev/api`; an unknown folder is a 404). |
 | `GET` | `/v1/items/:id` | One item from the catalog. |
 | `POST` | `/v1/items` | Create any type (`201`). Body: `type`, `name`, optional `folderId`, `favorite`, `notes`, `fields`, and the type object. A login without `password` gets a generated one (`length` 12–64, default 20; `special`, default true); an SSH key without key material gets a new Ed25519 key (else give `privateKey`, `publicKey`, `keyFingerprint` together). |
 | `PATCH` | `/v1/items/:id` | Change only the given keys; `""` clears an optional value; `fields` replaces the list, and a hidden field without `value` keeps its stored value; the type object must match. `{ "folderId" }` moves the item (`null` = no folder); `{ "favorite" }` stars it. |

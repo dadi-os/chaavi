@@ -108,7 +108,7 @@ export class BwVault implements Vault {
 
   async listItems(filter: ItemFilter): Promise<Item[]> {
     this.requireConfigured();
-    return filterItems(this.#items, filter);
+    return filterItems(this.#items, filter, this.#folders);
   }
 
   async getItem(id: string): Promise<Item> {

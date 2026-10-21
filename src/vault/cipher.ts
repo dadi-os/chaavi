@@ -9,6 +9,7 @@ import type {
   CreateItemInput,
   CustomField,
   CustomFieldInput,
+  Folder,
   Item,
   ItemFilter,
   ItemType,
@@ -274,8 +275,19 @@ export function itemFromCipher(cipher: Cipher): Item {
  * against the name, login username and websites, the public text of the other types, and
  * text custom fields.
  */
-export function filterItems(items: Item[], filter: ItemFilter): Item[] {
+export function filterItems(items: Item[], filter: ItemFilter, folders: Folder[]): Item[] {
+  const scope = filter.folder?.toLowerCase();
+  const folderOf = new Map(folders.map((folder) => [folder.id, folder.name.toLowerCase()]));
+  if (scope !== undefined && !folders.some((folder) => isWithinFolder(folder.name.toLowerCase(), scope))) {
+    throw new ChaaviError(404, "not_found", `no folder named "${filter.folder}"`);
+  }
   return items.filter((item) => {
+    if (scope !== undefined) {
+      const path = item.folderId === null ? undefined : folderOf.get(item.folderId);
+      if (path === undefined || !isWithinFolder(path, scope)) {
+        return false;
+      }
+    }
     if (filter.type !== undefined && item.type !== filter.type) {
       return false;
     }
@@ -292,6 +304,11 @@ export function filterItems(items: Item[], filter: ItemFilter): Item[] {
     }
     return true;
   });
+}
+
+/** True when the folder name `path` is `scope` or is nested under it (`dev/api` under `dev`). */
+function isWithinFolder(path: string, scope: string): boolean {
+  return path === scope || path.startsWith(`${scope}/`);
 }
 
 /** The values `q` searches for one item. */

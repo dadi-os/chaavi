@@ -282,5 +282,6 @@ export const itemsQuery = z
     q: z.string().min(1).optional(),
     uri: z.string().min(1).optional(),
     type: itemType.optional(),
+    folder: z.string().trim().min(1).optional(),
   })
   .strict();

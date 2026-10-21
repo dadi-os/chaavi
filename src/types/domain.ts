@@ -208,6 +208,8 @@ export type ItemFilter = {
   q?: string | undefined;
   uri?: string | undefined;
   type?: ItemType | undefined;
+  /** A folder name; takes the items in that folder and in every folder nested under it (`Dev` takes `Dev/api`). */
+  folder?: string | undefined;
 };
 
 /** Login fields on create. Omitted `password` is generated (`length` / `special`). */
