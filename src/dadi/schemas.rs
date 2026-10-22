@@ -786,6 +786,22 @@ pub fn generate(value: &Value) -> ApiResult<(Option<u32>, Option<bool>)> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeSet;
+
+    /// Upstream's write path decides which cipher types exist. When a merge adds one (a wallet, say),
+    /// this fails until `ItemType` learns it, instead of `GET /v1/items` returning corrupt_item
+    /// for that item in production.
+    #[test]
+    fn handles_every_cipher_type_upstream_accepts() {
+        let upstream: BTreeSet<i64> = include_str!("../api/core/ciphers.rs")
+            .lines()
+            .filter_map(|line| line.trim().split_once(" => data."))
+            .filter_map(|(code, _)| code.trim().parse().ok())
+            .collect();
+        let ours: BTreeSet<i64> = ItemType::ALL.iter().map(|item_type| item_type.code()).collect();
+        assert!(!upstream.is_empty(), "no cipher type arms found in src/api/core/ciphers.rs; update this test");
+        assert_eq!(upstream, ours, "upstream accepts cipher types that src/dadi does not handle (see ItemType)");
+    }
 
     #[test]
     fn create_refuses_another_types_object_and_unknown_keys() {
