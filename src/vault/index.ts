@@ -29,6 +29,8 @@ export { generateLoginPassword } from "./password.js";
 export type Vault = {
   start(): Promise<void>;
   stop(): Promise<void>;
+  /** Call `listener` whenever the catalog's items or folders change; returns the unsubscribe. */
+  onChange(listener: () => void): () => void;
   listItems(filter: ItemFilter): Promise<Item[]>;
   getItem(id: string): Promise<Item>;
   createItem(input: CreateItemInput): Promise<Item>;

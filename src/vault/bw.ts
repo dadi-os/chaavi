@@ -68,6 +68,7 @@ export class BwVault implements Vault {
   #timer: ReturnType<typeof setInterval> | undefined;
   /** Serializes catalog writes so a stale sync cannot overwrite a write. */
   #catalogOp: Promise<unknown> = Promise.resolve();
+  readonly #changeListeners = new Set<() => void>();
 
   constructor(config: Config, log: Logger, run: BwRunner) {
     this.#config = config;
@@ -88,6 +89,14 @@ export class BwVault implements Vault {
     this.#timer = setInterval(() => {
       void this.tick();
     }, this.#config.vault.sync_interval_ms);
+  }
+
+  /** Call `listener` whenever the catalog's items or folders change, from a write or a sync that pulled something new. Returns the unsubscribe. */
+  onChange(listener: () => void): () => void {
+    this.#changeListeners.add(listener);
+    return () => {
+      this.#changeListeners.delete(listener);
+    };
   }
 
   /** Stop the background sync loop and wait for an in-flight refresh. */
@@ -331,7 +340,19 @@ export class BwVault implements Vault {
    * upsert (or wipe a just-written row).
    */
   #withCatalog<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.#catalogOp.then(fn, fn);
+    const watched = async () => {
+      const before = JSON.stringify([this.#items, this.#folders]);
+      try {
+        return await fn();
+      } finally {
+        if (JSON.stringify([this.#items, this.#folders]) !== before) {
+          for (const listener of this.#changeListeners) {
+            listener();
+          }
+        }
+      }
+    };
+    const run = this.#catalogOp.then(watched, watched);
     this.#catalogOp = run.then(
       () => undefined,
       () => undefined,
