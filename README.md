@@ -1,147 +1,124 @@
-![Vaultwarden Logo](./resources/vaultwarden-logo-auto.svg)
+# Chaavi
 
-An alternative server implementation of the Bitwarden Client API, written in Rust and compatible with [official Bitwarden clients](https://bitwarden.com/download/) [[disclaimer](#disclaimer)], perfect for self-hosted deployment where running the official resource-heavy service might not be ideal.
+dadi's credential vault. Chaavi **is** a [Vaultwarden](https://github.com/dani-garcia/vaultwarden) fork: one container that serves the Bitwarden API to the official Bitwarden clients (the Arc extension, the web vault, mobile) and dadi's own `/v1` credential API to Thaali and Hath. It replaces the earlier pair of a TypeScript adapter plus an unmodified Vaultwarden (the adapter's last commit is the `adapter-final` tag).
 
----
+Vaultwarden stays zero-knowledge for everyone else. Chaavi unlocks one account for the agents the way a Bitwarden client does: it derives the key from the account's master password (`CHAAVI_PASSWORD`), decrypts what a request needs, and encrypts what a write stores. Unauthenticated; private mesh only (Caddy keeps `chaavi.dadi` off the internet).
 
-[![GitHub Release](https://img.shields.io/github/release/dani-garcia/vaultwarden.svg?style=for-the-badge&logo=vaultwarden&color=005AA4)](https://github.com/dani-garcia/vaultwarden/releases/latest)
-[![ghcr.io Pulls](https://img.shields.io/badge/dynamic/json?style=for-the-badge&logo=github&logoColor=fff&color=005AA4&url=https%3A%2F%2Fipitio.github.io%2Fbackage%2Fdani-garcia%2Fvaultwarden%2Fvaultwarden.json&query=%24.downloads&label=ghcr.io%20pulls&cacheSeconds=14400)](https://github.com/dani-garcia/vaultwarden/pkgs/container/vaultwarden)
-[![Docker Pulls](https://img.shields.io/docker/pulls/vaultwarden/server.svg?style=for-the-badge&logo=docker&logoColor=fff&color=005AA4&label=docker.io%20pulls)](https://hub.docker.com/r/vaultwarden/server)
-[![Quay.io](https://img.shields.io/badge/quay.io-download-005AA4?style=for-the-badge&logo=redhat&cacheSeconds=14400)](https://quay.io/repository/vaultwarden/server) <br>
-[![Contributors](https://img.shields.io/github/contributors-anon/dani-garcia/vaultwarden.svg?style=flat-square&logo=vaultwarden&color=005AA4)](https://github.com/dani-garcia/vaultwarden/graphs/contributors)
-[![Forks](https://img.shields.io/github/forks/dani-garcia/vaultwarden.svg?style=flat-square&logo=github&logoColor=fff&color=005AA4)](https://github.com/dani-garcia/vaultwarden/network/members)
-[![Stars](https://img.shields.io/github/stars/dani-garcia/vaultwarden.svg?style=flat-square&logo=github&logoColor=fff&color=005AA4)](https://github.com/dani-garcia/vaultwarden/stargazers)
-[![Issues Open](https://img.shields.io/github/issues/dani-garcia/vaultwarden.svg?style=flat-square&logo=github&logoColor=fff&color=005AA4&cacheSeconds=300)](https://github.com/dani-garcia/vaultwarden/issues)
-[![Issues Closed](https://img.shields.io/github/issues-closed/dani-garcia/vaultwarden.svg?style=flat-square&logo=github&logoColor=fff&color=005AA4&cacheSeconds=300)](https://github.com/dani-garcia/vaultwarden/issues?q=is%3Aissue+is%3Aclosed)
-[![AGPL-3.0 Licensed](https://img.shields.io/github/license/dani-garcia/vaultwarden.svg?style=flat-square&logo=vaultwarden&color=944000&cacheSeconds=14400)](https://github.com/dani-garcia/vaultwarden/blob/main/LICENSE.txt) <br>
-[![Dependency Status](https://img.shields.io/badge/dynamic/xml?url=https%3A%2F%2Fdeps.rs%2Frepo%2Fgithub%2Fdani-garcia%2Fvaultwarden%2Fstatus.svg&query=%2F*%5Blocal-name()%3D'svg'%5D%2F*%5Blocal-name()%3D'g'%5D%5B2%5D%2F*%5Blocal-name()%3D'text'%5D%5B4%5D&style=flat-square&logo=rust&label=dependencies&color=005AA4)](https://deps.rs/repo/github/dani-garcia/vaultwarden)
-[![GHA Release](https://img.shields.io/github/actions/workflow/status/dani-garcia/vaultwarden/release.yml?style=flat-square&logo=github&logoColor=fff&label=Release%20Workflow)](https://github.com/dani-garcia/vaultwarden/actions/workflows/release.yml)
-[![GHA Build](https://img.shields.io/github/actions/workflow/status/dani-garcia/vaultwarden/build.yml?style=flat-square&logo=github&logoColor=fff&label=Build%20Workflow)](https://github.com/dani-garcia/vaultwarden/actions/workflows/build.yml) <br>
-[![Matrix Chat](https://img.shields.io/matrix/vaultwarden:matrix.org.svg?style=flat-square&logo=matrix&logoColor=fff&color=953B00&cacheSeconds=14400)](https://matrix.to/#/#vaultwarden:matrix.org)
-[![GitHub Discussions](https://img.shields.io/github/discussions/dani-garcia/vaultwarden?style=flat-square&logo=github&logoColor=fff&color=953B00&cacheSeconds=300)](https://github.com/dani-garcia/vaultwarden/discussions)
-[![Discourse Discussions](https://img.shields.io/discourse/topics?server=https%3A%2F%2Fvaultwarden.discourse.group%2F&style=flat-square&logo=discourse&color=953B00)](https://vaultwarden.discourse.group/)
+Human fill in Arc uses the official Bitwarden extension at `https://chaavi.dadi`. Thaali's Chaavi page is the full password manager over `/v1`. Caddy terminates TLS with a mesh-local CA (Thaali installs it on join); `http://chaavi.dadi` serves `/v1*` and `/health` and redirects the rest to HTTPS (Bitwarden clients need a secure context). Both go to this one container.
 
-> [!IMPORTANT]
-> **When using this server, please report any bugs or suggestions directly to us (see [Get in touch](#get-in-touch)), regardless of whatever clients you are using (mobile, desktop, browser...). DO NOT use the official Bitwarden support channels.**
+Chaavi serves every Bitwarden item type (login with websites, TOTP and passkeys; Secure Note; card; identity; SSH key; bank account; driver's license; passport), custom fields of every kind, and folders. Bank accounts, driver's licenses and passports need Vaultwarden 1.37.4+ with the `pm-32009-new-item-types` client feature flag, which Nas sets on the container.
 
-<br>
+## Layout
 
-## Features
+This repo is `dani-garcia/vaultwarden` at a release tag plus dadi commits. dadi's code lives in `src/dadi/`; upstream files change only where they must (about 15 lines in `src/main.rs` and one re-export in `src/api/core/mod.rs`). There are no dadi database migrations, so the database is plain Vaultwarden's and the upstream image can always read it back.
 
-A nearly complete implementation of the Bitwarden Client API is provided, including:
-
- * [Personal Vault](https://bitwarden.com/help/managing-items/)
- * [Send](https://bitwarden.com/help/about-send/)
- * [Attachments](https://bitwarden.com/help/attachments/)
- * [Website icons](https://bitwarden.com/help/website-icons/)
- * [Personal API Key](https://bitwarden.com/help/personal-api-key/)
- * [Organizations](https://bitwarden.com/help/getting-started-organizations/)
-   - [Collections](https://bitwarden.com/help/about-collections/),
-     [Password Sharing](https://bitwarden.com/help/sharing/),
-     [Member Roles](https://bitwarden.com/help/user-types-access-control/),
-     [Groups](https://bitwarden.com/help/about-groups/),
-     [Event Logs](https://bitwarden.com/help/event-logs/),
-     [Admin Password Reset](https://bitwarden.com/help/admin-reset/),
-     [Directory Connector](https://bitwarden.com/help/directory-sync/),
-     [Policies](https://bitwarden.com/help/policies/)
- * [Multi/Two Factor Authentication](https://bitwarden.com/help/bitwarden-field-guide-two-step-login/)
-   - [Authenticator](https://bitwarden.com/help/setup-two-step-login-authenticator/),
-     [Email](https://bitwarden.com/help/setup-two-step-login-email/),
-     [FIDO2 WebAuthn](https://bitwarden.com/help/setup-two-step-login-fido/),
-     [YubiKey](https://bitwarden.com/help/setup-two-step-login-yubikey/),
-     [Duo](https://bitwarden.com/help/setup-two-step-login-duo/)
- * [Emergency Access](https://bitwarden.com/help/emergency-access/)
- * [Vaultwarden Admin Backend](https://github.com/dani-garcia/vaultwarden/wiki/Enabling-admin-page)
- * [Modified Web Vault client](https://github.com/dani-garcia/bw_web_builds) (Bundled within our containers)
-
-<br>
-
-## Usage
-
-> [!IMPORTANT]
-> The web-vault requires the use of HTTPS and a secure context for the [Web Crypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API). <br>
-> That means it will only work if you [enable HTTPS](https://github.com/dani-garcia/vaultwarden/wiki/Enabling-HTTPS). <br>
-> We also suggest to use a [reverse proxy](https://github.com/dani-garcia/vaultwarden/wiki/Proxy-examples).
-
-The recommended way to install and use Vaultwarden is via our container images which are published to [ghcr.io](https://github.com/dani-garcia/vaultwarden/pkgs/container/vaultwarden), [docker.io](https://hub.docker.com/r/vaultwarden/server) and [quay.io](https://quay.io/repository/vaultwarden/server).
-See [which container image to use](https://github.com/dani-garcia/vaultwarden/wiki/Which-container-image-to-use) for an explanation of the provided tags.
-
-There are also [community driven packages](https://github.com/dani-garcia/vaultwarden/wiki/Third-party-packages) which can be used, but those might be lagging behind the latest version or might deviate in the way Vaultwarden is configured, as described in our [Wiki](https://github.com/dani-garcia/vaultwarden/wiki).
-
-Alternatively, you can also [build Vaultwarden](https://github.com/dani-garcia/vaultwarden/wiki/Building-binary) yourself.
-
-While Vaultwarden is based upon the [Rocket web framework](https://rocket.rs) which has built-in support for TLS our recommendation would be that you setup a reverse proxy (see [proxy examples](https://github.com/dani-garcia/vaultwarden/wiki/Proxy-examples)).
-
-> [!TIP]
->**For more detailed examples on how to install, use and configure Vaultwarden you can check our [Wiki](https://github.com/dani-garcia/vaultwarden/wiki).**
-
-### Docker/Podman CLI
-
-Pull the container image and mount a volume from the host for persistent storage.<br>
-You can replace `docker` with `podman` if you prefer to use podman.
-
-```shell
-docker pull vaultwarden/server:latest
-docker run --detach --name vaultwarden \
-  --env DOMAIN="https://vw.domain.tld" \
-  --volume /vw-data/:/data/ \
-  --restart unless-stopped \
-  --publish 127.0.0.1:8000:80 \
-  vaultwarden/server:latest
+```
+src/dadi/
+  mod.rs        /v1 routes, events stream, writes through upstream's update_cipher_from_data
+  unlock.rs     finds the account, checks the master password, caches the user key per security stamp
+  crypto.rs     master key (PBKDF2 / Argon2id), HKDF stretch, type 2 EncStrings, zeroized keys
+  codec.rs      stored cipher <-> plaintext cipher JSON (item keys, URI checksums, password history)
+  cipher.rs     plaintext cipher <-> /v1 items, reveals, secrets, passkeys
+  schemas.rs    strict request validation (unknown keys are a 422)
+  totp.rs, ssh.rs, password.rs, error.rs, log.rs
+  testdata/     crypto vectors computed independently with Node
+dadi-tests/     interop suite: the official Bitwarden CLI is the oracle for what /v1 reads and writes
+docs/           upstream's README and the design/migration plan
 ```
 
-This will preserve any persistent data under `/vw-data/`, you can adapt the path to whatever suits you.
+## Config
 
-### Docker Compose
+Vaultwarden's own settings are environment variables (see `docs/vaultwarden-README.md`); Nas sets `DOMAIN`, `SIGNUPS_ALLOWED`, `ROCKET_PORT` and the `pm-32009-new-item-types` flag on the container. Chaavi's module env, edited in Preferences → Chaavi (which writes `modules/chaavi/.env` and restarts it):
 
-To use Docker compose you need to create a `compose.yaml` which will hold the configuration to run the Vaultwarden container.
+| Variable | Required at boot | Notes |
+| --- | --- | --- |
+| `CHAAVI_EMAIL` | no | The vault account to unlock. Empty with exactly one account in the vault uses that account; with several it names this variable in a 503. |
+| `CHAAVI_PASSWORD` | no | That account's master password. The adapter's old `BW_PASSWORD` is read when this is empty. |
 
-```yaml
-services:
-  vaultwarden:
-    image: vaultwarden/server:latest
-    container_name: vaultwarden
-    restart: unless-stopped
-    environment:
-      DOMAIN: "https://vw.domain.tld"
-    volumes:
-      - ./vw-data/:/data/
-    ports:
-      - 127.0.0.1:8000:80
+The process always boots. Without a password `/health` reports `vault: "unconfigured"` and `/v1` returns `503 vault_unconfigured` naming the variable. An unlock key is derived on the first `/v1` call and cached until the account's security stamp changes (a password change or key rotation), when it is derived again. Empty string counts as unset.
+
+## Vault setup
+
+1. Sign up the first user at `https://chaavi.dadi` (`SIGNUPS_ALLOWED` is on the container).
+2. Put that account's email and master password in Preferences → Chaavi on the box. In compose they live in `chaavi/.env`.
+3. `/health` should report `"vault": "ready"`. Thaali and Hath can call `/v1/*`.
+
+## Local run
+
+```sh
+cd ../nas
+docker compose up chaavi
 ```
 
-<br>
+Compose builds `docker/Dockerfile.alpine` with SQLite only. For a plain build and the checks CI runs:
 
-## Get in touch
+```sh
+cargo test --features sqlite dadi::      # unit tests for src/dadi
+cargo clippy --features sqlite --tests   # upstream builds with -D warnings
+cd dadi-tests && npm ci && ./serve-local.sh &    # a throwaway vault with self-signed TLS on :8099
+NODE_EXTRA_CA_CERTS=/tmp/chaavi-interop/cert.pem CHAAVI_URL=https://localhost:8099 npm test
+```
 
-Have a question, suggestion or need help? Join our community on [Matrix](https://matrix.to/#/#vaultwarden:matrix.org), [GitHub Discussions](https://github.com/dani-garcia/vaultwarden/discussions) or [Discourse Forums](https://vaultwarden.discourse.group/).
+## CI / CD
 
-Encountered a bug or crash? Please search our issue tracker and discussions to see if it's already been reported. If not, please [start a new discussion](https://github.com/dani-garcia/vaultwarden/discussions) or [create a new issue](https://github.com/dani-garcia/vaultwarden/issues/). Ensure you're using the latest version of Vaultwarden and there aren't any similar issues open or closed!
+| Workflow | When | What |
+| --- | --- | --- |
+| `build.yml` (upstream) | PR + push touching source | cargo build, test, clippy, fmt on the upstream matrix |
+| `chaavi.yml` → `interop` | PR + push to `main` | unit tests, a debug build, then the interop suite against it |
+| `chaavi.yml` → `publish` | `main` after `interop` | builds `docker/Dockerfile.alpine` and pushes `ghcr.io/<owner>/chaavi:{latest,sha}` |
+| `check-templates.yml`, `hadolint.yml` (upstream) | push / PR | Dockerfile template and lint checks |
 
-<br>
+Upstream's release, trivy, zizmor, typos and cache-cleanup workflows are removed: they publish to Vaultwarden's own registry or lint files this fork does not own.
 
-## Contributors
+## Taking an upstream release
 
-Thanks for your contribution to the project!
+```sh
+git fetch upstream tag <new tag>
+git merge <new tag>
+```
 
-[![Contributors Count](https://img.shields.io/github/contributors-anon/dani-garcia/vaultwarden?style=for-the-badge&logo=vaultwarden&color=005AA4)](https://github.com/dani-garcia/vaultwarden/graphs/contributors)<br>
-[![Contributors Avatars](https://contributors-img.web.app/image?repo=dani-garcia/vaultwarden)](https://github.com/dani-garcia/vaultwarden/graphs/contributors)
+Then run the unit tests and the interop suite, and read the release notes for client or crypto changes (new EncString types, cipher-key defaults, new item types, feature flags). `src/dadi/` reads and writes ciphers in the form `Cipher::to_json` and `CipherData` use, so a change to either is where a merge can break Chaavi.
 
-<br>
+## Logging / error codes
 
-## Disclaimer
+Every line is a JSON object on stdout in the Nas contract (`service=chaavi`, `level`, `msg`, `time`): upstream Vaultwarden's own lines too. Each `/v1` and `/health` request logs one summary line with `request_id` / `method` / `path` / `status` / `duration_ms` and echoes `X-Request-Id`; errors add `code`. Request lines carry the path, which includes an item id on reveal routes and the secret's name on `/v1/secrets/:name` — never a password, TOTP key or code, notes, card number or code, identity number, private key, hidden field value, or passkey key. A cipher that does not decrypt, or does not map to an item (an unknown type, a typed item without its type data, an organization item), fails the list with `corrupt_item` naming the item; the list is never silently short.
 
-**This project is not associated with [Bitwarden](https://bitwarden.com/) or Bitwarden, Inc.**
+HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`.
 
-However, one of the active maintainers for Vaultwarden is employed by Bitwarden and is allowed to contribute to the project on their own time. These contributions are independent of Bitwarden and are reviewed by other maintainers.
+| Code | Status | When |
+| --- | --- | --- |
+| `invalid_request` | 422 | Validation; a type object or reveal field the item's type lacks; an empty secret; an unknown folder id in a write. A body that is not JSON is a 400. |
+| `not_found` | 404 | Unknown item or folder id; no Secure Note has the secret's name; an unknown `folder` in a list query |
+| `conflict` | 409 | Two Secure Notes share a secret's name, or a note has two `Secret` fields |
+| `corrupt_item` | 502 | A stored item is not a valid item; `message` names it |
+| `vault_unconfigured` | 503 | The password (or, with several accounts, the email) is empty; `message` names it |
+| `vault_unreachable` | 502 | The account is missing, the password does not unlock it, or storage failed |
+| `internal_error` | 500 | Unexpected failure |
 
-The maintainers work together to set the direction for the project, focusing on serving the self-hosting community, including individuals, families, and small organizations, while ensuring the project's sustainability.
+## Routes
 
-**Please note:** We cannot be held liable for any data loss that may occur while using Vaultwarden. This includes passwords, attachments, and other information handled by the application. We highly recommend performing regular backups of your files and database. However, should you experience data loss, we encourage you to contact us immediately.
+Items are type-aware: every item has `id`, `name`, `type` (`login` \| `note` \| `card` \| `identity` \| `sshKey` \| `bankAccount` \| `driversLicense` \| `passport`), `folderId`, `favorite`, `hasNotes`, `fields`, `revisionDate`, and one object for its type (named like the type) holding its non-secret fields and `has…` flags for its secrets. Custom fields are `text` (value), `hidden` (`hasValue` only), `boolean` (value) or `linked` (`linkedTo`, a property of that item type). List and detail never carry a secret value; the reveal routes decrypt one on demand.
 
-<br>
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/health` | `{ "status": "ok", "vault": "ready" \| "unconfigured" }`. Ready means a password and an account to unlock; it does not derive the key. |
+| `GET` | `/v1/items` | Every live item, sorted by name. Query: `q` (name, username, websites, card brand/holder, identity name/email, text fields), `uri`, `type`, `folder` (a folder name, case-insensitive; it takes the folders nested under it too, since a slash in a name nests: `Dev` takes `Dev/api`; an unknown folder is a 404). |
+| `GET` | `/v1/items/:id` | One item. |
+| `GET` | `/v1/events` | SSE; emits `{ "type": "changed", "at" }` whenever the account's items or folders change, from `/v1` or from any Bitwarden client (the account's revision date is checked once a second). No replay. |
+| `POST` | `/v1/items` | Create any type (`201`). Body: `type`, `name`, optional `folderId`, `favorite`, `notes`, `fields`, and the type object. A login without `password` gets a generated one (`length` 12–64, default 20; `special`, default true); an SSH key without key material gets a new Ed25519 key (else give `privateKey`, `publicKey`, `keyFingerprint` together). |
+| `PATCH` | `/v1/items/:id` | Change only the given keys; `""` clears an optional value; `fields` replaces the list, and a hidden field without `value` keeps its stored value; the type object must match. `{ "folderId" }` moves the item (`null` = no folder); `{ "favorite" }` stars it. A changed login password or hidden field goes to the item's password history. |
+| `DELETE` | `/v1/items/:id` | Move any type to the trash (`204`); Bitwarden clients can restore it. |
+| `POST` | `/v1/items/:id/reveal` | `{ "field": "password" \| "totp" \| "number" \| "code" \| "ssn" \| "passportNumber" \| "licenseNumber" \| "privateKey" \| "accountNumber" \| "pin" \| "iban" \| "nationalIdentificationNumber" \| "notes" }` or `{ "field": "custom", "name" }` for a hidden field → `{ "value" }`. |
+| `POST` | `/v1/items/:id/totp` | `{ "code", "period", "remaining" }` from the login's key (base32 or `otpauth://totp`). |
+| `POST` | `/v1/items/:id/login` | `{ "username", "password" }` for a login fill; `username` is null when the login has none. |
+| `POST` | `/v1/items/:id/card` | `{ "cardholderName", "brand", "number", "expMonth", "expYear", "code" }` for a card fill. |
+| `POST` | `/v1/items/:id/passkey` | CDP-ready passkey (`credentialId`, `rpId`, `privateKey`, `userHandle`, `signCount`, `resident`). |
+| `GET` | `/v1/folders` | `{ "folders": [{ "id", "name" }] }`. |
+| `POST` | `/v1/folders` | `{ "name" }` → folder (`201`). |
+| `PATCH` | `/v1/folders/:id` | `{ "name" }` → folder. |
+| `DELETE` | `/v1/folders/:id` | `204`; its items move to no folder. |
+| `PUT` | `/v1/secrets/:name` | Agent secret: create (`201`) or update (`200`) the Secure Note named `name` (case-insensitive) with `{ "value", "notes"? }` in its hidden `Secret` field; other fields stay. → `{ "item", "created" }`. |
+| `POST` | `/v1/secrets/:name/reveal` | `{ "value" }` of that note's hidden `Secret` field. |
+| `POST` | `/v1/generate` | `{ "length"?, "special"? }` → `{ "password" }`, not stored. |
 
-## Bitwarden_RS
-
-This project was known as Bitwarden_RS and has been renamed to separate itself from the official Bitwarden server in the hopes of avoiding confusion and trademark/branding issues.<br>
-Please see [#1642 - v1.21.0 release and project rename to Vaultwarden](https://github.com/dani-garcia/vaultwarden/discussions/1642) for more explanation.
+Unknown query and body fields are a 422. Writes go through the same code path as the web vault's, so Bitwarden clients see them at once over the notification websocket. Items that belong to an organization are not read (the vault has none).

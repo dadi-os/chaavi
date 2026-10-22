@@ -1,0 +1,15 @@
+{
+  "name": "chaavi-interop",
+  "private": true,
+  "type": "module",
+  "description": "Contract and interop tests for Chaavi's /v1 API: the official Bitwarden CLI is the oracle.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test --test-force-exit --test-concurrency=1 interop.test.mjs"
+  },
+  "devDependencies": {
+    "@bitwarden/cli": "^2026.8.0"
+  }
+}

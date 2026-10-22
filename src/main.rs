@@ -53,6 +53,7 @@ mod api;
 mod auth;
 mod config;
 mod crypto;
+mod dadi;
 #[macro_use]
 mod db;
 mod http_client;
@@ -351,19 +352,10 @@ fn init_logging() -> Result<log::LevelFilter, Error> {
         logger = logger.level_for(path.to_owned(), level);
     }
 
-    if CONFIG.extended_logging() {
-        logger = logger.format(|out, message, record| {
-            out.finish(format_args!(
-                "[{}][{}][{}] {}",
-                chrono::Local::now().format(&CONFIG.log_timestamp_format()),
-                record.target(),
-                record.level(),
-                message
-            ));
-        });
-    } else {
-        logger = logger.format(|out, message, _| out.finish(format_args!("{message}")));
-    }
+    // dadi: every line is a Nas JSON contract object (service=chaavi).
+    logger = logger.format(|out, message, record| {
+        out.finish(format_args!("{}", dadi::log_line(record.level(), record.target(), message)));
+    });
 
     if let Some(log_file) = CONFIG.log_file() {
         #[cfg(windows)]
@@ -587,6 +579,7 @@ async fn launch_rocket(pool: db::DbPool, extra_debug: bool) -> Result<(), Error>
         .mount([basepath, "/identity"].concat(), api::identity_routes())
         .mount([basepath, "/icons"].concat(), api::icons_routes())
         .mount([basepath, "/notifications"].concat(), api::notifications_routes())
+        .mount([basepath, "/"].concat(), dadi::routes())
         .register([basepath, "/"].concat(), api::web_catchers())
         .register([basepath, "/api"].concat(), api::core_catchers())
         .register([basepath, "/admin"].concat(), api::admin_catchers())
@@ -596,6 +589,7 @@ async fn launch_rocket(pool: db::DbPool, extra_debug: bool) -> Result<(), Error>
         .attach(util::AppHeaders())
         .attach(util::Cors())
         .attach(util::BetterLogging(extra_debug))
+        .attach(dadi::RequestLog)
         .ignite()
         .await?;
 

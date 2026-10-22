@@ -10,7 +10,7 @@ mod public;
 mod sends;
 
 pub use accounts::purge_auth_requests;
-pub use ciphers::{CipherData, CipherSyncData, CipherSyncType, purge_trashed_ciphers};
+pub use ciphers::{CipherData, CipherSyncData, CipherSyncType, purge_trashed_ciphers, update_cipher_from_data};
 pub use emergency_access::{emergency_notification_reminder_job, emergency_request_timeout_job};
 pub use events::{event_cleanup_job, log_event, log_user_event};
 pub use sends::purge_sends;
