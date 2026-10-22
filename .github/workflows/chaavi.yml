@@ -39,7 +39,7 @@ jobs:
           key: chaavi-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Unit tests (src/dadi)
-        run: cargo test --features sqlite dadi::
+        run: cargo test --features sqlite "dadi::"
 
       - name: Build
         run: cargo build --features sqlite
