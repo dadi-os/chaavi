@@ -1,4 +1,16 @@
-node_modules
-dist
-.git
-.env
+# Ignore everything
+*
+
+# Allow what is needed
+!.git
+!docker/healthcheck.sh
+!docker/start.sh
+!macros
+!migrations
+!src
+
+!build.rs
+!Cargo.lock
+!Cargo.toml
+!rustfmt.toml
+!rust-toolchain.toml

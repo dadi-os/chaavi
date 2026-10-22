@@ -1,5 +1,16 @@
-node_modules/
-dist/
+# Local build artifacts
+target
+
+# Data folder
+data
+
+# IDE files
+.vscode
+.idea
+*.iml
+
+# Environment file
 .env
 
-.DS_Store
+# Web vault
+web-vault

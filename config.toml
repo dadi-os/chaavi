@@ -1,4 +1,0 @@
-[vault]
-timeout_ms = 30000
-# Background Vaultwarden pull interval (matches Thaali POLL_MS).
-sync_interval_ms = 2000

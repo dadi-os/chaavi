@@ -1,92 +1,99 @@
 # Chaavi
 
-Credential data API for dadi. Chaavi owns the catalog and `/v1` semantics for Thaali and Hath. Vaultwarden is the encrypted store (zero-knowledge durability for the Bitwarden extension). `@bitwarden/cli` is the crypto/transport driver only — unlock, background sync, create/edit/delete, and decrypt-on-reveal. Chaavi serves every Bitwarden item type (login with websites, TOTP and passkeys; Secure Note; card; identity; SSH key; bank account; driver's license; passport), custom fields of every kind, and folders. Bank accounts, driver's licenses and passports need Vaultwarden 1.37.4+ with the `pm-32009-new-item-types` client feature flag, which Nas sets on `chaavi-vault`; the CLI refuses to create them otherwise.
+dadi's credential vault. Chaavi **is** a [Vaultwarden](https://github.com/dani-garcia/vaultwarden) fork: one container that serves the Bitwarden API to the official Bitwarden clients (the Arc extension, the web vault, mobile) and dadi's own `/v1` credential API to Thaali and Hath. It replaces the earlier pair of a TypeScript adapter plus an unmodified Vaultwarden (the adapter's last commit is the `adapter-final` tag).
 
-Human fill in Arc uses the official Bitwarden extension at `https://chaavi.dadi`. Thaali's Chaavi page is the full password manager over this adapter. Caddy terminates TLS with a mesh-local CA (Thaali installs it on join): `/v1*` and `/health` go to Chaavi; everything else goes to Vaultwarden. This repo does not fork Vaultwarden; Nas runs unmodified upstream `vaultwarden/server:1.37.2-alpine`.
+Vaultwarden stays zero-knowledge for everyone else. Chaavi unlocks one account for the agents the way a Bitwarden client does: it derives the key from the account's master password (`CHAAVI_PASSWORD`), decrypts what a request needs, and encrypts what a write stores. Unauthenticated; private mesh only (Caddy keeps `chaavi.dadi` off the internet).
 
-Unauthenticated; private mesh only.
+Human fill in Arc uses the official Bitwarden extension at `https://chaavi.dadi`. Thaali's Chaavi page is the full password manager over `/v1`. Caddy terminates TLS with a mesh-local CA (Thaali installs it on join); `http://chaavi.dadi` serves `/v1*` and `/health` and redirects the rest to HTTPS (Bitwarden clients need a secure context). Both go to this one container.
 
-## Dependencies
-
-- Vaultwarden at `VAULT_URL` (Nas sidecar `chaavi-vault`, image `vaultwarden/server:1.37.2-alpine`)
-- Nas for mesh DNS (`chaavi.dadi`), compose/prod networking, and the shared logging contract
-- Bitwarden CLI (`@bitwarden/cli`) in-process — driver for sync/create/edit/delete/reveal when `BW_*` are set
-
-Dwar operational keys stay in Nas `modules/dwar`. Agent unlock keys are Chaavi module env, not Dwar/Nas operational secrets.
+Chaavi serves every Bitwarden item type (login with websites, TOTP and passkeys; Secure Note; card; identity; SSH key; bank account; driver's license; passport), custom fields of every kind, and folders. Bank accounts, driver's licenses and passports need Vaultwarden 1.37.4+ with the `pm-32009-new-item-types` client feature flag, which Nas sets on the container.
 
 ## Layout
 
+This repo is `dani-garcia/vaultwarden` at a release tag plus dadi commits. dadi's code lives in `src/dadi/`; upstream files change only where they must (about 15 lines in `src/main.rs` and one re-export in `src/api/core/mod.rs`). There are no dadi database migrations, so the database is plain Vaultwarden's and the upstream image can always read it back.
+
 ```
-chaavi/
-  src/
-    app.ts, config.ts, logging.ts, errors.ts, constants.ts
-    vault/        Vault interface; bw.ts (CLI driver + in-memory catalog); cipher.ts (cipher <-> item
-                  mapping, writes, reveal); totp.ts, ssh.ts (Ed25519 generation), password.ts
-    routers/      HTTP routes + schemas
-    types/        domain types
-  test/
-  config.toml
+src/dadi/
+  mod.rs        /v1 routes, events stream, writes through upstream's update_cipher_from_data
+  unlock.rs     finds the account, checks the master password, caches the user key per security stamp
+  crypto.rs     master key (PBKDF2 / Argon2id), HKDF stretch, type 2 EncStrings, zeroized keys
+  codec.rs      stored cipher <-> plaintext cipher JSON (item keys, URI checksums, password history)
+  cipher.rs     plaintext cipher <-> /v1 items, reveals, secrets, passkeys
+  schemas.rs    strict request validation (unknown keys are a 422)
+  totp.rs, ssh.rs, password.rs, error.rs, log.rs
+  testdata/     crypto vectors computed independently with Node
+dadi-tests/     interop suite: the official Bitwarden CLI is the oracle for what /v1 reads and writes
+docs/           upstream's README and the design/migration plan
 ```
 
-## Config vs env
+## Config
 
-`config.toml` (checked in): vault `timeout_ms`, `sync_interval_ms` (background Vaultwarden pull; default 2000, so an edit made in another Bitwarden client reaches Thaali within about two seconds).
-
-Default bind is `0.0.0.0:8080` in `src/constants.ts`. Prod may set `HOST` and `PORT` (validated; empty falls back to the constants).
+Vaultwarden's own settings are environment variables (see `docs/vaultwarden-README.md`); Nas sets `DOMAIN`, `SIGNUPS_ALLOWED`, `ROCKET_PORT` and the `pm-32009-new-item-types` flag on the container. Chaavi's module env, edited in Preferences → Chaavi (which writes `modules/chaavi/.env` and restarts it):
 
 | Variable | Required at boot | Notes |
 | --- | --- | --- |
-| `VAULT_URL` | no | Internal Vaultwarden URL. Nas injects it. Empty → `vault: "unconfigured"`. |
-| `BW_CLIENTID` | no | Personal API key client id. Set in Preferences → Chaavi. |
-| `BW_CLIENTSECRET` | no | Personal API key client secret. |
-| `BW_PASSWORD` | no | Master password for `bw unlock`. |
-| `BITWARDENCLI_APPDATA_DIR` | no | CLI state dir. Set in the image/compose. |
+| `CHAAVI_EMAIL` | no | The vault account to unlock. Empty with exactly one account in the vault uses that account; with several it names this variable in a 503. |
+| `CHAAVI_PASSWORD` | no | That account's master password. The adapter's old `BW_PASSWORD` is read when this is empty. |
 
-The process always boots. Empty or partial vault env is reported by `/health` as `vault: "unconfigured"`; `Vault.start` is a no-op and `/v1` returns `503 vault_unconfigured` naming the first empty variable. When vault env is complete, boot unlocks, runs a first sync into the in-memory catalog (fails closed if that sync fails), then refreshes on `sync_interval_ms`. Empty string counts as unset.
+The process always boots. Without a password `/health` reports `vault: "unconfigured"` and `/v1` returns `503 vault_unconfigured` naming the variable. An unlock key is derived on the first `/v1` call and cached until the account's security stamp changes (a password change or key rotation), when it is derived again. Empty string counts as unset.
+
+## Vault setup
+
+1. Sign up the first user at `https://chaavi.dadi` (`SIGNUPS_ALLOWED` is on the container).
+2. Put that account's email and master password in Preferences → Chaavi on the box. In compose they live in `chaavi/.env`.
+3. `/health` should report `"vault": "ready"`. Thaali and Hath can call `/v1/*`.
 
 ## Local run
 
 ```sh
 cd ../nas
-docker compose up chaavi chaavi-vault
-docker compose run --rm chaavi npm test
+docker compose up chaavi
 ```
 
-Source is bind-mounted; edits restart in place.
+Compose builds `docker/Dockerfile.alpine` with SQLite only. For a plain build and the checks CI runs:
+
+```sh
+cargo test --features sqlite dadi::      # unit tests for src/dadi
+cargo clippy --features sqlite --tests   # upstream builds with -D warnings
+cd dadi-tests && npm ci && ./serve-local.sh &    # a throwaway vault with self-signed TLS on :8099
+NODE_EXTRA_CA_CERTS=/tmp/chaavi-interop/cert.pem CHAAVI_URL=https://localhost:8099 npm test
+```
 
 ## CI / CD
 
 | Workflow | When | What |
 | --- | --- | --- |
-| `ci.yml` → `ci` | PR + push to `main` | Build `dev`, `npm test` in the container (`VAULT_URL` set, `BW_*` empty), build `production` |
-| `ci.yml` → `publish` | `main` after `ci` | Push `ghcr.io/<owner>/chaavi:{latest,sha}` |
+| `build.yml` (upstream) | PR + push touching source | cargo build, test, clippy, fmt on the upstream matrix |
+| `chaavi.yml` → `interop` | PR + push to `main` | unit tests, a debug build, then the interop suite against it |
+| `chaavi.yml` → `publish` | `main` after `interop` | builds `docker/Dockerfile.alpine` and pushes `ghcr.io/<owner>/chaavi:{latest,sha}` |
+| `check-templates.yml`, `hadolint.yml` (upstream) | push / PR | Dockerfile template and lint checks |
 
-Concurrency cancels superseded runs on the same ref.
+Upstream's release, trivy, zizmor, typos and cache-cleanup workflows are removed: they publish to Vaultwarden's own registry or lint files this fork does not own.
+
+## Taking an upstream release
+
+```sh
+git fetch upstream tag <new tag>
+git merge <new tag>
+```
+
+Then run the unit tests and the interop suite, and read the release notes for client or crypto changes (new EncString types, cipher-key defaults, new item types, feature flags). `src/dadi/` reads and writes ciphers in the form `Cipher::to_json` and `CipherData` use, so a change to either is where a merge can break Chaavi.
 
 ## Logging / error codes
 
-Logs follow the nas JSON contract (`service=chaavi`, request summary with `request_id` / `duration_ms`, errors with `code`). Default Fastify access logging is off. Process-level boot/shutdown lines use the same JSON shape via `createLogger()`. Request lines include method and path (item id on reveal routes, the secret's name on `/v1/secrets/:name`) — never a password, TOTP key or code, notes, card number or code, identity number, private key, hidden field value, or passkey key. A cipher that does not map to an item (an unknown type, or a typed item without its type data) fails the sync with `corrupt_item` naming the item; the catalog is never silently short. Background sync failures log `vault_unreachable` and retry on the next tick.
+Every line is a JSON object on stdout in the Nas contract (`service=chaavi`, `level`, `msg`, `time`): upstream Vaultwarden's own lines too. Each `/v1` and `/health` request logs one summary line with `request_id` / `method` / `path` / `status` / `duration_ms` and echoes `X-Request-Id`; errors add `code`. Request lines carry the path, which includes an item id on reveal routes and the secret's name on `/v1/secrets/:name` — never a password, TOTP key or code, notes, card number or code, identity number, private key, hidden field value, or passkey key. A cipher that does not decrypt, or does not map to an item (an unknown type, a typed item without its type data, an organization item), fails the list with `corrupt_item` naming the item; the list is never silently short.
 
-HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`. Shared codes include `invalid_request`, `not_found`, `conflict`, `internal_error`. Domain codes include `vault_unconfigured`, `vault_unreachable`. See nas README for the shared catalog.
+HTTP errors: `{ "error": { "type": "<code>", "message": "..." } }`.
 
 | Code | Status | When |
 | --- | --- | --- |
-| `invalid_request` | 422 | Validation; a type object or reveal field the item's type lacks; an empty secret; an unknown folder id in a write |
-| `not_found` | 404 | Unknown item or folder id; no Secure Note has the secret's name |
+| `invalid_request` | 422 | Validation; a type object or reveal field the item's type lacks; an empty secret; an unknown folder id in a write. A body that is not JSON is a 400. |
+| `not_found` | 404 | Unknown item or folder id; no Secure Note has the secret's name; an unknown `folder` in a list query |
 | `conflict` | 409 | Two Secure Notes share a secret's name, or a note has two `Secret` fields |
-| `corrupt_item` | 502 | A stored item is not a valid item (unknown type, or missing its type data); `message` names it |
-| `vault_unconfigured` | 503 | A vault env var is empty; `message` names it |
-| `vault_unreachable` | 502 | `bw` / Vaultwarden failure; `message` carries the CLI's first stderr line |
+| `corrupt_item` | 502 | A stored item is not a valid item; `message` names it |
+| `vault_unconfigured` | 503 | The password (or, with several accounts, the email) is empty; `message` names it |
+| `vault_unreachable` | 502 | The account is missing, the password does not unlock it, or storage failed |
 | `internal_error` | 500 | Unexpected failure |
-
-## Vault setup
-
-1. Sign up the first user at `https://chaavi.dadi` (Bitwarden web vault or extension). Thaali trusts the mesh CA on join. `SIGNUPS_ALLOWED` is on the Vaultwarden container, not this process.
-2. Create a personal API key in the Bitwarden account.
-3. Put `BW_CLIENTID`, `BW_CLIENTSECRET`, and `BW_PASSWORD` in Preferences → Chaavi on the box (writes `modules/chaavi/.env` and restarts chaavi). In compose, the same keys live in `chaavi/.env`.
-4. `/health` should report `"vault": "ready"`. Thaali and Hath can call `/v1/*`.
-
-Human fill uses `https://chaavi.dadi` (Bitwarden extension / web vault). Thaali's password manager and Hath inject use cleartext `http://chaavi.dadi/v1*` (mesh proxy).
 
 ## Routes
 
@@ -94,13 +101,13 @@ Items are type-aware: every item has `id`, `name`, `type` (`login` \| `note` \| 
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| `GET` | `/health` | `{ "status": "ok", "vault": "ready" \| "unconfigured" }`. Does not ping Vaultwarden. |
-| `GET` | `/v1/items` | Catalog from memory. Query: `q` (name, username, websites, card brand/holder, identity name/email, text fields), `uri`, `type`, `folder` (a folder name, case-insensitive; it takes the folders nested under it too, since a slash in a name nests: `Dev` takes `Dev/api`; an unknown folder is a 404). |
-| `GET` | `/v1/items/:id` | One item from the catalog. |
-| `GET` | `/v1/events` | SSE; emits `{ type: "changed", at }` whenever the catalog's items or folders change (a write here, or a sync that pulled something new). No replay. |
+| `GET` | `/health` | `{ "status": "ok", "vault": "ready" \| "unconfigured" }`. Ready means a password and an account to unlock; it does not derive the key. |
+| `GET` | `/v1/items` | Every live item, sorted by name. Query: `q` (name, username, websites, card brand/holder, identity name/email, text fields), `uri`, `type`, `folder` (a folder name, case-insensitive; it takes the folders nested under it too, since a slash in a name nests: `Dev` takes `Dev/api`; an unknown folder is a 404). |
+| `GET` | `/v1/items/:id` | One item. |
+| `GET` | `/v1/events` | SSE; emits `{ "type": "changed", "at" }` whenever the account's items or folders change, from `/v1` or from any Bitwarden client (the account's revision date is checked once a second). No replay. |
 | `POST` | `/v1/items` | Create any type (`201`). Body: `type`, `name`, optional `folderId`, `favorite`, `notes`, `fields`, and the type object. A login without `password` gets a generated one (`length` 12–64, default 20; `special`, default true); an SSH key without key material gets a new Ed25519 key (else give `privateKey`, `publicKey`, `keyFingerprint` together). |
-| `PATCH` | `/v1/items/:id` | Change only the given keys; `""` clears an optional value; `fields` replaces the list, and a hidden field without `value` keeps its stored value; the type object must match. `{ "folderId" }` moves the item (`null` = no folder); `{ "favorite" }` stars it. |
-| `DELETE` | `/v1/items/:id` | Delete any type (`204`; Vaultwarden keeps it in trash). |
+| `PATCH` | `/v1/items/:id` | Change only the given keys; `""` clears an optional value; `fields` replaces the list, and a hidden field without `value` keeps its stored value; the type object must match. `{ "folderId" }` moves the item (`null` = no folder); `{ "favorite" }` stars it. A changed login password or hidden field goes to the item's password history. |
+| `DELETE` | `/v1/items/:id` | Move any type to the trash (`204`); Bitwarden clients can restore it. |
 | `POST` | `/v1/items/:id/reveal` | `{ "field": "password" \| "totp" \| "number" \| "code" \| "ssn" \| "passportNumber" \| "licenseNumber" \| "privateKey" \| "accountNumber" \| "pin" \| "iban" \| "nationalIdentificationNumber" \| "notes" }` or `{ "field": "custom", "name" }` for a hidden field → `{ "value" }`. |
 | `POST` | `/v1/items/:id/totp` | `{ "code", "period", "remaining" }` from the login's key (base32 or `otpauth://totp`). |
 | `POST` | `/v1/items/:id/login` | `{ "username", "password" }` for a login fill; `username` is null when the login has none. |
@@ -114,4 +121,4 @@ Items are type-aware: every item has `id`, `name`, `type` (`login` \| `note` \| 
 | `POST` | `/v1/secrets/:name/reveal` | `{ "value" }` of that note's hidden `Secret` field. |
 | `POST` | `/v1/generate` | `{ "length"?, "special"? }` → `{ "password" }`, not stored. |
 
-Unknown query and body fields are a 422.
+Unknown query and body fields are a 422. Writes go through the same code path as the web vault's, so Bitwarden clients see them at once over the notification websocket. Items that belong to an organization are not read (the vault has none).
