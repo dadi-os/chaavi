@@ -7,7 +7,17 @@ name: Chaavi
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "tools/**"
+      - ".gitattributes"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "tools/**"
+      - ".gitattributes"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

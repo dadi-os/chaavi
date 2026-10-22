@@ -73,11 +73,19 @@ Upstream's release, trivy, zizmor, typos and cache-cleanup workflows are removed
 ## Taking an upstream release
 
 ```sh
-git fetch upstream tag <new tag>
-git merge <new tag>
+tools/dadi/merge-upstream.sh 1.37.5          # a release tag
+tools/dadi/merge-upstream.sh upstream/main   # or try upstream's tip before a tag exists
 ```
 
-Then run the unit tests and the interop suite, and read the release notes for client or crypto changes (new EncString types, cipher-key defaults, new item types, feature flags). `src/dadi/` reads and writes ciphers in the form `Cipher::to_json` and `CipherData` use, so a change to either is where a merge can break Chaavi.
+The script fetches upstream, merges it without committing, settles the conflicts that are always dadi's (`README.md` stays ours through `.gitattributes`; the upstream workflows we removed stay removed; upstream's README is refreshed into `docs/vaultwarden-README.md`), and prints:
+
+- the **conflicts left** for you, if any;
+- a **watch list**: upstream changes to the files `src/dadi` depends on (cipher and user models, notifications, auth, crypto, `main.rs`). A change there can break Chaavi without a merge conflict;
+- the **cipher types upstream's write path accepts**. `src/dadi` handles types 1–8; if upstream adds a ninth (a wallet or anything else), `GET /v1/items` returns `corrupt_item` for an item of that type until `ItemType` in `schemas.rs` and `cipher.rs` learn it. That is deliberate: the list is never silently short.
+
+Then build and test it (`cargo test --features sqlite 'dadi::'`, `cargo clippy --features sqlite --tests`, the interop suite above) and commit. `git merge --abort` backs out. A trial against upstream's tip (19 commits past 1.37.4) merged with no conflicts, built clippy-clean, passed all 65 unit tests and all 14 interop tests.
+
+Keep dadi's changes inside `src/dadi/`; every line added elsewhere in a file Vaultwarden owns is a line a future merge can conflict with.
 
 ## Logging / error codes
 

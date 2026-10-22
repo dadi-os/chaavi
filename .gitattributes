@@ -1,2 +1,10 @@
 # Ignore vendored scripts in GitHub stats
 src/static/scripts/* linguist-vendored
+
+# dadi owns these outright: an upstream edit never conflicts with them. tools/dadi/merge-upstream.sh
+# sets up the "ours" merge driver (git has no built-in one) and refreshes docs/vaultwarden-README.md
+# from upstream's README.
+README.md merge=ours
+
+# Scripts run on Linux (CI, WSL, the box); a Windows checkout must not turn them into CRLF.
+*.sh text eol=lf
