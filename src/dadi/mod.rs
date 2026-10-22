@@ -7,6 +7,7 @@
 
 mod cipher;
 mod codec;
+mod collate;
 mod crypto;
 mod error;
 mod log;
@@ -106,7 +107,7 @@ async fn opened_ciphers(session: &Session, conn: &DbConn) -> ApiResult<Vec<Value
         out.push(codec::open_cipher(raw, &session.key)?);
     }
     out.sort_by_cached_key(|c| {
-        (c["name"].as_str().unwrap_or_default().to_lowercase(), c["id"].as_str().unwrap_or_default().to_owned())
+        collate::key(c["name"].as_str().unwrap_or_default(), c["id"].as_str().unwrap_or_default())
     });
     Ok(out)
 }
@@ -337,7 +338,7 @@ async fn list_folders(conn: DbConn) -> ApiResult<Json<Value>> {
         folders.push(folder_json(&folder, &name));
     }
     folders.sort_by_cached_key(|f| {
-        (f["name"].as_str().unwrap_or_default().to_lowercase(), f["id"].as_str().unwrap_or_default().to_owned())
+        collate::key(f["name"].as_str().unwrap_or_default(), f["id"].as_str().unwrap_or_default())
     });
     Ok(Json(json!({ "folders": folders })))
 }
