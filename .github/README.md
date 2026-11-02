@@ -33,7 +33,7 @@ Vaultwarden's own settings are environment variables (see upstream's [README](..
 | Variable | Required at boot | Notes |
 | --- | --- | --- |
 | `CHAAVI_EMAIL` | no | The vault account to unlock. Empty with exactly one account in the vault uses that account; with several it names this variable in a 503. |
-| `CHAAVI_PASSWORD` | no | That account's master password. The adapter's old `BW_PASSWORD` is read when this is empty. |
+| `CHAAVI_PASSWORD` | no | That account's master password. |
 
 The process always boots. Without a password `/health` reports `vault: "unconfigured"` and `/v1` returns `503 vault_unconfigured` naming the variable. An unlock key is derived on the first `/v1` call and cached until the account's security stamp changes (a password change or key rotation), when it is derived again. Empty string counts as unset.
 

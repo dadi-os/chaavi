@@ -24,7 +24,6 @@ use crate::{
 
 pub const EMAIL_VAR: &str = "CHAAVI_EMAIL";
 pub const PASSWORD_VAR: &str = "CHAAVI_PASSWORD";
-const LEGACY_PASSWORD_VAR: &str = "BW_PASSWORD";
 
 /// The device Chaavi's writes come from. Never saved: it only names the origin of pushes, so
 /// clients do not ignore them as their own.
@@ -34,22 +33,11 @@ fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_default()
 }
 
-/// The agent's master password: `CHAAVI_PASSWORD`, else the adapter's old `BW_PASSWORD`, so a
-/// box whose .env still has the old name keeps working until Preferences rewrites it.
-fn password() -> String {
-    let password = env(PASSWORD_VAR);
-    if password.is_empty() {
-        env(LEGACY_PASSWORD_VAR)
-    } else {
-        password
-    }
-}
-
 /// The vault account: the one named by `CHAAVI_EMAIL`, or the only account when it is unset.
 /// 503 when the password is empty (or the email is, with several accounts); 502 when the
 /// account does not exist.
 pub async fn account(conn: &DbConn) -> ApiResult<User> {
-    if password().is_empty() {
+    if env(PASSWORD_VAR).is_empty() {
         return Err(ChaaviError::unconfigured(PASSWORD_VAR));
     }
     let email = env(EMAIL_VAR);
@@ -97,7 +85,7 @@ pub async fn open(conn: &DbConn) -> ApiResult<Session> {
     let key = match cache.as_ref() {
         Some(cached) if cached.user_uuid == user.uuid && cached.stamp == user.security_stamp => Arc::clone(&cached.key),
         _ => {
-            let key = Arc::new(derive(&user, email, password()).await?);
+            let key = Arc::new(derive(&user, email, env(PASSWORD_VAR)).await?);
             *cache = Some(Cached {
                 user_uuid: user.uuid.clone(),
                 stamp: user.security_stamp.clone(),
